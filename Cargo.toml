@@ -1,0 +1,69 @@
+[package]
+name = "opendbpylot"
+version = "0.1.0"
+edition = "2021"
+description = "Natural-language-to-SQL via Retrieval-Augmented Generation, in Rust"
+license = "MIT"
+default-run = "opendbpylot"
+
+[dependencies]
+# Async runtime — lets us do network + DB calls without blocking.
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client for LLM / embedding APIs. rustls-tls avoids a system OpenSSL dependency.
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Structs <-> JSON.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Lets traits declare `async fn` (needed for `Box<dyn Trait>` / `Arc<dyn Trait>`).
+async-trait = "0.1"
+
+# Ergonomic error handling (`?` + readable messages).
+anyhow = "1"
+
+# Loads API keys from a local .env file.
+dotenvy = "0.15"
+
+# SQLite, compiled in via "bundled" (no system install needed).
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Regex for extracting SQL out of LLM responses.
+regex = "1"
+once_cell = "1"
+
+# Web server for the API + frontend (ws = WebSocket transport).
+axum = { version = "0.7", features = ["ws"] }
+
+# Interactive CLI: line editing + history, colors, and an animated spinner.
+rustyline = "14"
+colored = "2"
+indicatif = "0.17"
+
+# Server-Sent Events streaming in the web server.
+async-stream = "0.3"
+
+# The `Stream` trait + combinators for the agent loop's incremental event output.
+tokio-stream = "0.1"
+
+# Encrypted-file secret vault (AES-256-GCM + Argon2id key from machine ID — no keychain prompts).
+aes-gcm  = "0.10"
+argon2   = "0.5"
+rand     = "0.8"
+
+# Kept as optional fallback in case someone prefers the OS keychain.
+keyring = { version = "3", features = ["apple-native"], optional = true }
+
+# Optional: Qdrant vector database backend (enable with --features qdrant).
+qdrant-client = { version = "1.11", optional = true }
+
+# Remote database support: PostgreSQL + MySQL via sqlx.
+# Use runtime-tokio-rustls to stay consistent with reqwest's rustls-tls.
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "mysql"], default-features = false, optional = true }
+
+[features]
+default = ["remote-db"]
+remote-db = ["dep:sqlx"]
+qdrant    = ["dep:qdrant-client"]
+keychain  = ["dep:keyring"]

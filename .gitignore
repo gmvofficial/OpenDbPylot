@@ -1,0 +1,15 @@
+# Rust build output
+/target
+
+# Secrets / local env
+.env
+
+# Planning notes & scratch material (not part of the published project)
+docs/
+extra_repo/
+
+# Node
+frontends/node_modules/
+
+# macOS
+.DS_Store
