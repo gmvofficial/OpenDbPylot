@@ -1,23 +1,72 @@
-//! Interactive CLI for opendbpylot — a friendly elephant that turns your questions
-//! into SQL and runs them, with a boxed, visual layout.
+//! The `dbpylot` command-line app, as a library entry point.
 //!
-//! Usage:
-//!   cargo run                         # interactive chat (REPL)
-//!   cargo run -- "your question"      # one-shot: answer once and exit
+//! [`run`] is called by the `dbpylot` binary and — via [`run_with`] — by the
+//! Python and Node bindings, so all three run the *same* in-process CLI:
 //!
-//! Runs offline (mock LLM) unless OPENAI_API_KEY is set in your .env.
+//!   dbpylot                  # chat with your database (interactive REPL)
+//!   dbpylot init             # setup wizard: choose an LLM + database
+//!   dbpylot ask "question"   # one-shot: answer a question and exit
+//!   dbpylot serve            # launch the web UI (frontend + backend)
+//!   dbpylot doctor           # test your LLM + database connections
+//!   dbpylot status           # show the current configuration
+//!   dbpylot demo             # offline demo on a seeded sample database
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use clap::{Parser, Subcommand};
 use colored::{Color, Colorize};
 use indicatif::{ProgressBar, ProgressStyle};
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 
-use opendbpylot::demo::build_demo_opendbpylot;
-use opendbpylot::sqlrunner::QueryResult;
-use opendbpylot::opendbpylot::OpenDbPylot;
+use crate::app;
+use crate::conversation::MemoryConversationStore;
+use crate::demo::build_demo_opendbpylot;
+use crate::secret::{EncryptedFileSecretStore, FileSecretStore, SecretStore};
+use crate::settings::Settings;
+use crate::sqlrunner::QueryResult;
+use crate::opendbpylot::OpenDbPylot;
+
+#[derive(Parser)]
+#[command(
+    name = "dbpylot",
+    about = "opendbpylot — chat with your database in natural language",
+    version
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Interactive setup wizard: choose an LLM provider and connect a database
+    Init,
+    /// Ask a single question and exit
+    Ask {
+        /// The question (quote it, or pass it as trailing words)
+        #[arg(trailing_var_arg = true, required = true)]
+        question: Vec<String>,
+    },
+    /// Launch the web UI (a single self-contained frontend + backend)
+    Serve {
+        /// Don't open a browser — for servers, containers, or remote hosts
+        #[arg(long)]
+        headless: bool,
+    },
+    /// Test that the configured LLM and database are reachable
+    Doctor,
+    /// Show the current configuration (secrets masked)
+    Status,
+    /// Offline demo on a seeded sample database (no setup needed)
+    Demo {
+        /// Optional one-shot question; omit for an interactive REPL
+        #[arg(trailing_var_arg = true)]
+        question: Vec<String>,
+    },
+}
 
 /// Our mascot. 🐘
 const ELEPHANT: &str = r#"
@@ -25,7 +74,7 @@ const ELEPHANT: &str = r#"
          (   `.   .'   )
           \    `.'    /
            |  o   o  |
-           |    ^    |          v a n n a - r s
+           |    ^    |        o p e n d b p y l o t
             \  '-'  /
           ___|     |___
          /             \___
@@ -39,21 +88,282 @@ const ELEPHANT: &str = r#"
 /// Max width for wrapped SQL text inside its box.
 const SQL_WRAP: usize = 84;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Run the CLI using the process's own arguments. Entry point for the `dbpylot`
+/// binary.
+pub async fn run() -> Result<()> {
+    run_with(std::env::args().collect()).await
+}
+
+/// Run the CLI with an explicit argument vector (`args[0]` is the program name).
+/// Used by the Python/Node bindings to expose a fully in-process CLI.
+pub async fn run_with(args: Vec<String>) -> Result<()> {
     dotenvy::dotenv().ok();
+    crate::app::init_tracing();
 
-    let (opendbpylot, backend) = build_demo_opendbpylot().await?;
+    match Cli::parse_from(args).command {
+        // Bare `dbpylot` → chat with the configured database.
+        None => cmd_chat().await,
+        Some(Command::Init) => cmd_init().await,
+        Some(Command::Ask { question }) => cmd_ask(&question.join(" ")).await,
+        Some(Command::Serve { headless }) => crate::server::run(!headless).await,
+        Some(Command::Doctor) => cmd_doctor().await,
+        Some(Command::Status) => cmd_status().await,
+        Some(Command::Demo { question }) => cmd_demo(&question.join(" ")).await,
+    }
+}
 
-    // One-shot mode: `cargo run -- "how many users?"`
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if !args.is_empty() {
-        answer(&opendbpylot, "cli", &args.join(" ")).await;
+/// Build the configured engine (LLM + database) from saved settings + the vault.
+/// `None` means the app hasn't been set up yet.
+fn build_configured() -> Result<Option<OpenDbPylot>> {
+    let secrets = open_secrets()?;
+    let settings = load_settings(&*secrets);
+    let conversations = Arc::new(MemoryConversationStore::new());
+    app::build_opendbpylot(&settings, &*secrets, conversations)
+}
+
+/// Shown when the user runs a command before finishing setup.
+fn not_configured_hint() {
+    println!(
+        "  {}\n  Run {} to choose an LLM + database, or {} for the web UI.",
+        "dbpylot isn't set up yet.".yellow(),
+        "dbpylot init".cyan(),
+        "dbpylot serve".cyan()
+    );
+}
+
+/// Bare `dbpylot` → interactive chat REPL against the configured database.
+async fn cmd_chat() -> Result<()> {
+    match build_configured()? {
+        Some(bot) => {
+            print_banner("your database");
+            repl(&bot).await
+        }
+        None => {
+            not_configured_hint();
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `dbpylot doctor` — check config presence and reachability (no LLM spend).
+async fn cmd_doctor() -> Result<()> {
+    let secrets = open_secrets()?;
+    let settings = load_settings(&*secrets);
+    println!("{}", "dbpylot doctor".bold().cyan());
+
+    // LLM provider + key.
+    let key_ok = settings.provider == "ollama"
+        || secrets.get(&settings.provider).ok().flatten().is_some();
+    println!(
+        "  LLM provider : {} {}",
+        settings.provider.bold(),
+        if key_ok { "✓ key present".green() } else { "✗ no key stored".red() }
+    );
+
+    // Database reachability.
+    match build_configured()? {
+        Some(bot) => match bot.test_connection().await {
+            Ok(()) => {
+                let tables = bot.list_ddl().await.unwrap_or_default().len();
+                println!(
+                    "  Database     : {} ✓ reachable ({} learned table entr{})",
+                    settings.db_kind.bold(),
+                    tables,
+                    if tables == 1 { "y" } else { "ies" }
+                );
+            }
+            Err(e) => println!("  Database     : {} ✗ {}", settings.db_kind.bold(), e.to_string().red()),
+        },
+        None => println!("  Database     : {}", "not configured — run `dbpylot init`".yellow()),
+    }
+    Ok(())
+}
+
+/// `dbpylot status` — print the saved configuration (no secrets).
+async fn cmd_status() -> Result<()> {
+    let secrets = open_secrets()?;
+    let settings = load_settings(&*secrets);
+    let key_ok = settings.provider == "ollama"
+        || secrets.get(&settings.provider).ok().flatten().is_some();
+    let model = settings.effective_model();
+    let target = match settings.db_kind.as_str() {
+        "postgres" | "postgresql" | "mysql" | "mariadb" => {
+            if settings.db_connection_string.is_empty() { "(no connection URL)".into() }
+            else { "(connection URL in vault)".into() }
+        }
+        _ => settings.db_path.clone(),
+    };
+    println!("{}", "dbpylot status".bold().cyan());
+    println!("  provider   : {}", settings.provider);
+    println!("  model      : {}", if model.is_empty() { "(default)".into() } else { model });
+    println!("  api key    : {}", if key_ok { "stored".green() } else { "missing".red() });
+    println!("  database   : {} → {}", settings.db_kind, target);
+    println!("  config dir : {}", app::home().display());
+    Ok(())
+}
+
+/// The encrypted secret vault, shared with the web app (same `~/.opendbpylot`).
+fn open_secrets() -> Result<Arc<dyn SecretStore>> {
+    let store: Arc<dyn SecretStore> = match std::env::var("OPENDBPYLOT_SECRETS").as_deref() {
+        Ok("file") => Arc::new(FileSecretStore::new(app::home().join("secrets.json"))?),
+        _ => Arc::new(EncryptedFileSecretStore::new(app::home().join("secrets.enc"))?),
+    };
+    Ok(store)
+}
+
+/// Load saved settings + the DB connection string from the vault (mirrors the
+/// server's boot) so terminal `ask` uses the very same configuration as the UI.
+fn load_settings(secrets: &dyn SecretStore) -> Settings {
+    let mut settings = Settings::load(&app::home().join("settings.json"));
+    if settings.db_connection_string.is_empty() {
+        if let Ok(Some(c)) = secrets.get("db_connection_string") {
+            settings.db_connection_string = c;
+        }
+    }
+    settings
+}
+
+/// `opendbpylot ask "..."` — answer once using the user's real configuration.
+async fn cmd_ask(question: &str) -> Result<()> {
+    let secrets = open_secrets()?;
+    let settings = load_settings(&*secrets);
+    let conversations = Arc::new(MemoryConversationStore::new());
+    match app::build_opendbpylot(&settings, &*secrets, conversations)? {
+        Some(bot) => {
+            answer(&bot, "cli", question).await;
+            Ok(())
+        }
+        None => {
+            not_configured_hint();
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `dbpylot demo [question]` — the offline showcase on a seeded sample DB.
+async fn cmd_demo(question: &str) -> Result<()> {
+    let (bot, backend) = build_demo_opendbpylot().await?;
+    if !question.trim().is_empty() {
+        answer(&bot, "cli", question).await;
         return Ok(());
     }
-
     print_banner(backend);
-    repl(&opendbpylot).await
+    repl(&bot).await
+}
+
+/// `dbpylot init` — interactive terminal wizard. Writes to the same
+/// `settings.json` + encrypted vault the web app uses, then tests the connection.
+async fn cmd_init() -> Result<()> {
+    let mut rl = DefaultEditor::new()?;
+    println!("\n{}\n", "dbpylot init".bold().cyan());
+
+    // 1. LLM provider.
+    println!("{}", "1) Choose an LLM provider:".bold());
+    println!("   {}  OpenAI          (needs an API key)", "openai".cyan());
+    println!("   {}  Anthropic Claude (needs an API key)", "anthropic".cyan());
+    println!("   {}  Ollama          (local, no key)", "ollama".cyan());
+    let provider = loop {
+        let p = prompt(&mut rl, "provider [openai/anthropic/ollama]: ")?.to_lowercase();
+        if ["openai", "anthropic", "ollama"].contains(&p.as_str()) {
+            break p;
+        }
+        println!("  {}", "please type openai, anthropic, or ollama".red());
+    };
+
+    let secrets = open_secrets()?;
+    let mut settings = Settings::load(&app::home().join("settings.json"));
+    settings.provider = provider.clone();
+
+    // 2. API key (into the encrypted vault), unless Ollama.
+    if provider != "ollama" {
+        let key = prompt(&mut rl, &format!("{provider} API key: "))?;
+        if key.trim().is_empty() {
+            println!("  {}", "no key entered — you can add one later in the web UI".yellow());
+        } else {
+            secrets.set(&provider, key.trim())?;
+        }
+    }
+
+    // 3. Optional model override.
+    let model = prompt(&mut rl, "model (blank = provider default): ")?;
+    settings.model = model.trim().to_string();
+
+    // 4. Database.
+    println!("\n{}", "2) Connect a database:".bold());
+    let kinds = if cfg!(feature = "duckdb") {
+        "sqlite/postgres/mysql/duckdb"
+    } else {
+        "sqlite/postgres/mysql"
+    };
+    let db_kind = loop {
+        let k = prompt(&mut rl, &format!("database [{kinds}]: "))?.to_lowercase();
+        let ok = matches!(k.as_str(), "sqlite" | "postgres" | "postgresql" | "mysql" | "mariadb")
+            || (cfg!(feature = "duckdb") && k == "duckdb");
+        if ok {
+            break k;
+        }
+        println!("  {}", format!("please type one of: {kinds}").red());
+    };
+    settings.db_kind = db_kind.clone();
+
+    match db_kind.as_str() {
+        "postgres" | "postgresql" | "mysql" | "mariadb" => {
+            let url = prompt(&mut rl, "connection URL (e.g. postgres://user:pass@host:5432/db): ")?;
+            if !url.trim().is_empty() {
+                // The URL holds a password → store it in the vault, not settings.json.
+                secrets.set("db_connection_string", url.trim())?;
+                settings.db_connection_string = url.trim().to_string();
+            }
+        }
+        _ => {
+            let default = if db_kind == "duckdb" { ":memory:" } else { "demo.db" };
+            let path = prompt(&mut rl, &format!("file path [{default}]: "))?;
+            settings.db_path = if path.trim().is_empty() { default.into() } else { path.trim().into() };
+        }
+    }
+
+    // 5. Save + verify.
+    settings.save(&app::home().join("settings.json"))?;
+    println!("\n{}", "Saved. Testing the connection…".dimmed());
+
+    let conversations = Arc::new(MemoryConversationStore::new());
+    match app::build_opendbpylot(&settings, &*secrets, conversations)? {
+        Some(bot) => match bot.test_connection().await {
+            Ok(()) => match bot.train_from_schema().await {
+                Ok(n) => {
+                    println!("  {} connected — learned {n} table(s).", "✓".green().bold());
+                    println!("\nStart chatting:  {}", "dbpylot".cyan());
+                    println!("Or ask once:     {}", "dbpylot ask \"how many rows are in each table?\"".cyan());
+                }
+                Err(e) => println!(
+                    "  {} connected to the database, but couldn't import the schema:\n     {e}\n  \
+                     This is often a rejected API key (the schema is embedded via your LLM \
+                     provider). Check the key and re-run {}.",
+                    "!".yellow().bold(),
+                    "dbpylot init".cyan()
+                ),
+            },
+            Err(e) => println!("  {} configured, but couldn't reach the database: {e}", "!".yellow().bold()),
+        },
+        None => println!(
+            "  {} saved, but no API key is stored yet — add one with {} or in the web UI.",
+            "!".yellow().bold(),
+            "dbpylot init".cyan()
+        ),
+    }
+    Ok(())
+}
+
+/// Read a line with a prompt, trimming the trailing newline.
+fn prompt(rl: &mut DefaultEditor, label: &str) -> Result<String> {
+    match rl.readline(label) {
+        Ok(s) => Ok(s),
+        Err(ReadlineError::Interrupted | ReadlineError::Eof) => {
+            println!("\n{}", "setup cancelled".dimmed());
+            std::process::exit(130);
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -263,12 +573,22 @@ async fn answer(opendbpylot: &OpenDbPylot, conversation_id: &str, question: &str
     match result {
         Ok(ans) => {
             print_box("SQL", &wrap(&ans.sql, SQL_WRAP), Color::Magenta, Some(Color::Yellow));
+            if ans.repairs_used > 0 {
+                println!(
+                    "  {}",
+                    format!("(self-repaired after {} failed attempt(s))", ans.repairs_used).dimmed()
+                );
+            }
             match ans.result {
                 Some(rows) => print_box("RESULT", &result_lines(&rows), Color::Cyan, None),
                 None => println!(
                     "  {}",
                     "(not run — not a read query or no database)".dimmed()
                 ),
+            }
+            // Optional natural-language answer (when summaries are enabled).
+            if let Some(answer) = &ans.answer {
+                print_box("ANSWER", &wrap(answer, SQL_WRAP), Color::Green, None);
             }
             println!();
         }

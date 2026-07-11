@@ -13,6 +13,9 @@ use serde_json::{json, Value};
 
 use super::{LlmResponse, LlmService, Message, ToolCall, ToolSchema};
 
+/// Default request timeout (see `openai.rs` — same reasoning).
+const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 pub struct AnthropicLlm {
     client: reqwest::Client,
     api_key: String,
@@ -23,7 +26,7 @@ pub struct AnthropicLlm {
 impl AnthropicLlm {
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: super::http_client(DEFAULT_TIMEOUT),
             api_key: api_key.into(),
             model: model.into(),
             max_tokens: 1024,
@@ -32,6 +35,12 @@ impl AnthropicLlm {
 
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = max_tokens;
+        self
+    }
+
+    /// Override the request timeout (from user settings).
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.client = super::http_client(timeout);
         self
     }
 }

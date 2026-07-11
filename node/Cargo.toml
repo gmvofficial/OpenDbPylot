@@ -1,0 +1,23 @@
+[package]
+name = "opendbpylot-node-bindings"
+version = "0.1.0"
+edition = "2021"
+description = "Node.js bindings for opendbpylot — natural-language → SQL via RAG"
+license = "Apache-2.0"
+repository = "https://github.com/gmvofficial/OpenDbPylot"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "2", features = ["napi6"] }
+napi-derive = "2"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+
+# The main library crate (path-based; the workflow builds from this repo).
+opendbpylot = { path = "..", package = "opendbpylot" }
+
+[build-dependencies]
+napi-build = "2"

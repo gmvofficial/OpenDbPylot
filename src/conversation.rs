@@ -53,6 +53,10 @@ pub trait ConversationStore: Send + Sync {
     async fn ensure(&self, _conversation_id: &str, _title: &str) -> Result<()> {
         Ok(())
     }
+    /// Delete a conversation and all its history. Default no-op.
+    async fn delete(&self, _conversation_id: &str) -> Result<()> {
+        Ok(())
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -114,6 +118,11 @@ impl ConversationStore for MemoryConversationStore {
             c.title = title.to_string();
             c.updated_ms = now_ms();
         }
+        Ok(())
+    }
+
+    async fn delete(&self, id: &str) -> Result<()> {
+        self.conversations.lock().unwrap().remove(id);
         Ok(())
     }
 }
@@ -187,6 +196,14 @@ impl ConversationStore for FileConversationStore {
         if c.title.is_empty() {
             c.title = title.to_string();
             c.updated_ms = now_ms();
+            self.save(&g)?;
+        }
+        Ok(())
+    }
+
+    async fn delete(&self, id: &str) -> Result<()> {
+        let mut g = self.data.lock().unwrap();
+        if g.remove(id).is_some() {
             self.save(&g)?;
         }
         Ok(())

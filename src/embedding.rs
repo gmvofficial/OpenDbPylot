@@ -5,6 +5,9 @@
 //! into its own trait so the in-memory store can use either a local, offline
 //! embedding or a real API-based one.
 
+pub mod cache;
+#[cfg(feature = "fastembed")]
+pub mod fastembed;
 pub mod local;
 pub mod openai;
 

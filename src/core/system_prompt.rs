@@ -18,10 +18,13 @@ pub fn build_sql_system_prompt(dialect: &str) -> String {
             the context is insufficient, say so plainly instead of guessing.\n\
          3. Write {dialect}-compliant, read-only SQL (SELECT/WITH). Prefer the most relevant \
             table(s) and add LIMITs for exploratory queries. When filtering on a text value the \
-            user typed (a product name, category, status, country, etc.), match it \
-            case-insensitively and allow partial matches — use \
+            user typed (any name, label, category, or status column, whatever the domain), match \
+            it case-insensitively and allow partial matches — use \
             `WHERE LOWER(column) LIKE LOWER('%value%')` rather than `column = 'value'` — because \
-            the user's spelling or capitalization may not exactly match the stored value.\n\
+            the user's spelling or capitalization may not exactly match the stored value. When the \
+            question asks for a quantity ('how many', 'how much', 'number of'), return the \
+            aggregated value (COUNT, COUNT(DISTINCT ...), or SUM), not the list of underlying rows \
+            — a grouped 'per X' question still returns a count per group.\n\
          4. Charts: call `visualize_data` when the result is an aggregation with a numeric \
             measure — it auto-picks the chart type (a value over time → line; a numeric measure \
             by category → bar; two numeric columns → scatter; a single numeric column → \

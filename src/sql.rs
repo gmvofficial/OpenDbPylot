@@ -55,6 +55,16 @@ pub fn is_sql_valid(sql: &str) -> bool {
 ///   (Postgres allows `WITH t AS (DELETE ...) SELECT ...`) — those are rejected.
 /// - Anything else (DROP/DELETE/UPDATE/INSERT/ALTER/CREATE/TRUNCATE/…) is rejected.
 pub fn is_read_only(sql: &str) -> bool {
+    if !regex_read_only(sql) {
+        return false;
+    }
+    // Second layer: the AST check can only make the verdict stricter, never
+    // looser (a parse failure falls back to the regex verdict above). Catches
+    // e.g. multi-statement smuggling: "SELECT 1; DROP TABLE x".
+    !matches!(crate::schema::is_read_only_ast(sql), Some(false))
+}
+
+fn regex_read_only(sql: &str) -> bool {
     let trimmed = sql.trim_start();
     let upper = trimmed.to_uppercase();
 
@@ -111,5 +121,7 @@ mod tests {
         assert!(!is_read_only("TRUNCATE orders"));
         // Data-modifying CTE (Postgres) is blocked.
         assert!(!is_read_only("WITH t AS (DELETE FROM orders RETURNING *) SELECT * FROM t"));
+        // Multi-statement smuggling is blocked by the AST layer.
+        assert!(!is_read_only("SELECT 1; DROP TABLE users"));
     }
 }

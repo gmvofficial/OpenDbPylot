@@ -4,7 +4,7 @@ import { tokens } from "../styles/design-tokens";
 import "./opendbpylot-chat";
 
 interface Provider { id: string; label: string; needs_key: boolean; }
-interface AppSettings { provider: string; model: string; db_kind: string; db_path: string; db_connection_string: string; key_set: boolean; ready: boolean; }
+interface AppSettings { provider: string; model: string; db_kind: string; db_path: string; db_connection_string: string; key_set: boolean; ready: boolean; duckdb_available?: boolean; }
 interface Conversation { id: string; title: string; }
 type View = "chat" | "settings" | "train";
 
@@ -92,6 +92,20 @@ export class OpenDbPylotApp extends LitElement {
     .conv-item:hover { background: var(--opendbpylot-background-highest); color: var(--opendbpylot-foreground-default); }
     .conv-item.active { background: rgba(21,168,168,.1); color: var(--opendbpylot-foreground-default); }
     .conv-item.active::before { background: var(--opendbpylot-teal); }
+
+    .conv-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .conv-del {
+      flex-shrink: 0; opacity: 0; border: none; background: transparent; cursor: pointer;
+      color: var(--opendbpylot-foreground-dimmest); padding: 2px; border-radius: 4px;
+      display: flex; align-items: center; transition: opacity .1s, color .1s, background .1s;
+    }
+    .conv-del svg { width: 14px; height: 14px; }
+    .conv-item:hover .conv-del { opacity: 0.65; }
+    .conv-del:hover { opacity: 1; color: var(--opendbpylot-orange); background: rgba(254,93,38,.14); }
+
+    /* Save button: disabled + saved state (spinner reuses the existing .spin) */
+    .btn-primary:disabled { opacity: 0.75; cursor: default; }
+    .btn-primary.btn-saved { background: var(--opendbpylot-teal); }
 
     .empty-conv {
       padding: 12px 14px; font-size: 12px;
@@ -398,6 +412,9 @@ export class OpenDbPylotApp extends LitElement {
   @state() private fApiKey = "";
   @state() private settingsToast = "";
   @state() private settingsToastErr = false;
+  // Save-button state machine: idle → saving → saved (or error). Resets to idle
+  // whenever the user edits any field, so the button re-invites "Save & connect".
+  @state() private saveState: "idle" | "saving" | "saved" | "error" = "idle";
 
   @state() private schemaToast = "";
   @state() private schemaLoading = false;
@@ -420,6 +437,7 @@ export class OpenDbPylotApp extends LitElement {
   }
 
   private async jget(url: string) { return (await fetch(url)).json(); }
+  private async jdelete(url: string) { return (await fetch(url, { method: "DELETE" })).json(); }
   private async jpost(url: string, body?: unknown) {
     return (await fetch(url, {
       method: "POST",
@@ -473,31 +491,69 @@ export class OpenDbPylotApp extends LitElement {
     this.refreshConversations();
   }
 
-  private async saveSettings() {
-    const s = await this.jpost("/api/settings", {
-      provider: this.fProvider,
-      model: this.fModel.trim(),
-      db_kind: this.fDbKind,
-      db_path: this.fDbPath.trim(),
-      db_connection_string: this.fDbConnStr.trim(),
-      api_key: this.fApiKey.trim(),
-    });
-    this.fApiKey = "";
-    this.settings = s;
-    if (!s.ready) {
-      this.settingsToast = "Saved — API key still required";
-      this.settingsToastErr = true;
-    } else if (s.db_error) {
-      this.settingsToast = `Saved, but couldn't reach the database: ${s.db_error}`;
-      this.settingsToastErr = true;
-    } else if (s.tables_imported > 0) {
-      this.settingsToast = `Connected — learned ${s.tables_imported} table(s) from your database`;
-      this.settingsToastErr = false;
+  private async deleteConversation(id: string, e: Event) {
+    e.stopPropagation(); // don't also open the conversation
+    if (!confirm("Delete this conversation? This can't be undone.")) return;
+    await this.jdelete(`/api/conversations/${encodeURIComponent(id)}`);
+    // If we deleted the one we're viewing, start a fresh chat; otherwise just refresh.
+    if (id === this.activeConv) {
+      await this.newChat();
     } else {
-      this.settingsToast = "Connected successfully";
-      this.settingsToastErr = false;
+      await this.refreshConversations();
+    }
+  }
+
+  /// Called on any settings-field edit: a change means the current save is stale,
+  /// so reset the button to invite "Save & connect" again (e.g. after switching DB).
+  private markSettingsDirty() {
+    if (this.saveState !== "idle") this.saveState = "idle";
+  }
+
+  private async saveSettings() {
+    if (this.saveState === "saving") return; // ignore double-clicks
+    this.saveState = "saving";
+    this.settingsToast = "";
+    try {
+      const s = await this.jpost("/api/settings", {
+        provider: this.fProvider,
+        model: this.fModel.trim(),
+        db_kind: this.fDbKind,
+        db_path: this.fDbPath.trim(),
+        db_connection_string: this.fDbConnStr.trim(),
+        api_key: this.fApiKey.trim(),
+      });
+      this.fApiKey = "";
+      this.settings = s;
+      if (!s.ready) {
+        this.saveState = "error";
+        this.settingsToast = "Saved — API key still required";
+        this.settingsToastErr = true;
+      } else if (s.db_error) {
+        this.saveState = "error";
+        this.settingsToast = `Saved, but couldn't reach the database: ${s.db_error}`;
+        this.settingsToastErr = true;
+      } else {
+        this.saveState = "saved";
+        this.settingsToast = s.tables_imported > 0
+          ? `Connected — learned ${s.tables_imported} table(s) from your database`
+          : "Saved & connected";
+        this.settingsToastErr = false;
+      }
+    } catch (err) {
+      this.saveState = "error";
+      this.settingsToast = "Couldn't save settings — is the server running?";
+      this.settingsToastErr = true;
     }
     setTimeout(() => { this.settingsToast = ""; }, 5000);
+  }
+
+  /// Button label + icon derived from saveState.
+  private saveButtonContent() {
+    switch (this.saveState) {
+      case "saving": return html`${this.iSpin()} Connecting…`;
+      case "saved":  return html`${this.iCheck()} Saved &amp; connected`;
+      default:       return html`${this.iCheck()} Save &amp; connect`;
+    }
   }
 
   private async learnSchema() {
@@ -538,6 +594,7 @@ export class OpenDbPylotApp extends LitElement {
   private iDB() { return html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>`; }
   private iLLM() { return html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M9 9h6M9 12h6M9 15h4"/></svg>`; }
   private iCheck() { return html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"/></svg>`; }
+  private iTrash() { return html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>`; }
   private iWarn() { return html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>`; }
   private iDoc() { return html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>`; }
   private iCode() { return html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>`; }
@@ -581,7 +638,7 @@ export class OpenDbPylotApp extends LitElement {
                 <div class="field">
                   <label class="field-label">Provider</label>
                   <select .value=${this.fProvider}
-                    @change=${(e: Event) => { this.fProvider = (e.target as HTMLSelectElement).value; }}>
+                    @change=${(e: Event) => { this.fProvider = (e.target as HTMLSelectElement).value; this.markSettingsDirty(); }}>
                     ${this.providers.map(p => html`<option value="${p.id}">${p.label}</option>`)}
                   </select>
                 </div>
@@ -590,7 +647,7 @@ export class OpenDbPylotApp extends LitElement {
                   <input type="text"
                     placeholder=${this.settings.model || "Provider default"}
                     .value=${this.fModel}
-                    @input=${(e: Event) => { this.fModel = (e.target as HTMLInputElement).value; }} />
+                    @input=${(e: Event) => { this.fModel = (e.target as HTMLInputElement).value; this.markSettingsDirty(); }} />
                   <span class="field-hint">Leave blank to use the recommended model</span>
                 </div>
               </div>
@@ -606,7 +663,7 @@ export class OpenDbPylotApp extends LitElement {
                   <input type="password"
                     placeholder=${this.settings.key_set ? "Enter a new key to replace the saved one" : "Paste your API key"}
                     .value=${this.fApiKey}
-                    @input=${(e: Event) => { this.fApiKey = (e.target as HTMLInputElement).value; }} />
+                    @input=${(e: Event) => { this.fApiKey = (e.target as HTMLInputElement).value; this.markSettingsDirty(); }} />
                 </div>` : nothing}
             </div>
           </div>
@@ -628,10 +685,15 @@ export class OpenDbPylotApp extends LitElement {
                     { id: "sqlite",   label: "SQLite",     hint: "Local file" },
                     { id: "postgres", label: "PostgreSQL", hint: "Remote / cloud" },
                     { id: "mysql",    label: "MySQL",      hint: "Remote / cloud" },
+                    // Only offered when the server binary was compiled with the
+                    // `duckdb` feature (the backend advertises availability).
+                    ...(this.settings.duckdb_available
+                      ? [{ id: "duckdb", label: "DuckDB", hint: "Local file / CSV / Parquet" }]
+                      : []),
                   ].map(db => html`
                     <button
                       class="db-type-btn ${this.fDbKind === db.id ? "active" : ""}"
-                      @click=${() => { this.fDbKind = db.id; }}>
+                      @click=${() => { this.fDbKind = db.id; this.markSettingsDirty(); }}>
                       <span class="db-type-name">${db.label}</span>
                       <span class="db-type-hint">${db.hint}</span>
                     </button>
@@ -645,10 +707,26 @@ export class OpenDbPylotApp extends LitElement {
                   <label class="field-label">File path</label>
                   <input type="text" placeholder="demo.db"
                     .value=${this.fDbPath}
-                    @input=${(e: Event) => { this.fDbPath = (e.target as HTMLInputElement).value; }} />
+                    @input=${(e: Event) => { this.fDbPath = (e.target as HTMLInputElement).value; this.markSettingsDirty(); }} />
                   <span class="field-hint">
                     Path relative to the server's working directory.
                     Example: <code style="font-family:var(--opendbpylot-font-family-mono);font-size:11px;background:rgba(255,255,255,.07);padding:1px 6px;border-radius:4px;">data/production.db</code>
+                  </span>
+                </div>
+              ` : nothing}
+
+              <!-- DuckDB: file path (or :memory:) -->
+              ${this.fDbKind === "duckdb" ? html`
+                <div class="field">
+                  <label class="field-label">File path</label>
+                  <input type="text" placeholder="data.duckdb  (or  :memory:)"
+                    .value=${this.fDbPath}
+                    @input=${(e: Event) => { this.fDbPath = (e.target as HTMLInputElement).value; this.markSettingsDirty(); }} />
+                  <span class="field-hint">
+                    Path to a <code style="font-family:var(--opendbpylot-font-family-mono);font-size:11px;background:rgba(255,255,255,.07);padding:1px 6px;border-radius:4px;">.duckdb</code> file, or
+                    <code style="font-family:var(--opendbpylot-font-family-mono);font-size:11px;background:rgba(255,255,255,.07);padding:1px 6px;border-radius:4px;">:memory:</code> for a scratch database.
+                    Queries can also read local files directly, e.g.
+                    <code style="font-family:var(--opendbpylot-font-family-mono);font-size:11px;background:rgba(255,255,255,.07);padding:1px 6px;border-radius:4px;">SELECT * FROM 'sales.csv'</code>.
                   </span>
                 </div>
               ` : nothing}
@@ -660,7 +738,7 @@ export class OpenDbPylotApp extends LitElement {
                   <input type="text"
                     placeholder="postgresql://user:password@host:5432/database"
                     .value=${this.fDbConnStr}
-                    @input=${(e: Event) => { this.fDbConnStr = (e.target as HTMLInputElement).value; }} />
+                    @input=${(e: Event) => { this.fDbConnStr = (e.target as HTMLInputElement).value; this.markSettingsDirty(); }} />
                   <span class="field-hint">
                     Format: <code style="font-family:var(--opendbpylot-font-family-mono);font-size:11px;background:rgba(255,255,255,.07);padding:1px 6px;border-radius:4px;">postgresql://user:password@host:5432/dbname</code>
                     — also accepts <code style="font-family:var(--opendbpylot-font-family-mono);font-size:11px;background:rgba(255,255,255,.07);padding:1px 6px;border-radius:4px;">postgres://</code> prefix.
@@ -676,7 +754,7 @@ export class OpenDbPylotApp extends LitElement {
                   <input type="text"
                     placeholder="mysql://user:password@host:3306/database"
                     .value=${this.fDbConnStr}
-                    @input=${(e: Event) => { this.fDbConnStr = (e.target as HTMLInputElement).value; }} />
+                    @input=${(e: Event) => { this.fDbConnStr = (e.target as HTMLInputElement).value; this.markSettingsDirty(); }} />
                   <span class="field-hint">
                     Format: <code style="font-family:var(--opendbpylot-font-family-mono);font-size:11px;background:rgba(255,255,255,.07);padding:1px 6px;border-radius:4px;">mysql://user:password@host:3306/dbname</code>.
                     MariaDB is also supported using the same URL format.
@@ -687,7 +765,9 @@ export class OpenDbPylotApp extends LitElement {
           </div>
 
           <div class="form-actions">
-            <button class="btn btn-primary" @click=${this.saveSettings}>${this.iCheck()} Save and connect</button>
+            <button class="btn btn-primary ${this.saveState === "saved" ? "btn-saved" : ""}"
+              ?disabled=${this.saveState === "saving"}
+              @click=${this.saveSettings}>${this.saveButtonContent()}</button>
             <button class="btn btn-ghost" @click=${() => { this.currentView = "chat"; }}>Cancel</button>
             ${this.toast(this.settingsToast, this.settingsToastErr)}
           </div>
@@ -723,19 +803,19 @@ export class OpenDbPylotApp extends LitElement {
             <div class="train-section-header">
               <div class="train-section-num">1</div>
               <div class="train-section-info">
-                <p class="train-section-title">Import database schema</p>
-                <p class="train-section-desc">Reads your connected database and automatically learns all table names, column types, and relationships. Start here.</p>
+                <p class="train-section-title">Database schema</p>
+                <p class="train-section-desc">Your schema is imported automatically when you connect a database in Settings. Use the button below only to <strong>re-sync after your database structure changes</strong> (new tables or columns).</p>
               </div>
             </div>
             <div class="train-section-body">
               <div class="schema-action-box">
                 <div class="schema-action-icon">${this.iDB()}</div>
                 <div class="schema-action-info">
-                  <strong>Import schema from connected database</strong>
-                  <span>Scans all tables and adds their definitions to the knowledge base</span>
+                  <strong>Re-import schema</strong>
+                  <span>Re-scans all tables and refreshes their definitions in the knowledge base</span>
                 </div>
                 <button class="btn btn-primary" @click=${this.learnSchema} ?disabled=${this.schemaLoading}>
-                  ${this.schemaLoading ? html`${this.iSpin()} Importing…` : html`${this.iDB()} Import schema`}
+                  ${this.schemaLoading ? html`${this.iSpin()} Re-importing…` : html`${this.iDB()} Re-import schema`}
                 </button>
               </div>
               ${this.schemaToast ? html`<div class="toast-msg ok">${this.iCheck()} ${this.schemaToast}</div>` : nothing}
@@ -869,7 +949,9 @@ ORDER BY revenue DESC;"
                 <div class="conv-item ${c.id === this.activeConv ? "active" : ""}"
                   title="${c.title || "Untitled"}"
                   @click=${() => this.openConversation(c.id)}>
-                  ${c.title || "Untitled"}
+                  <span class="conv-title">${c.title || "Untitled"}</span>
+                  <button class="conv-del" title="Delete conversation"
+                    @click=${(e: Event) => this.deleteConversation(c.id, e)}>${this.iTrash()}</button>
                 </div>`)
             : html`<div class="empty-conv">No conversations yet</div>`}
         </div>

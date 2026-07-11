@@ -1,5 +1,5 @@
-# Rust build output
-/target
+# Rust build output (root + nested binding crates: python/, node/)
+target/
 
 # Secrets / local env
 .env
@@ -10,6 +10,16 @@ extra_repo/
 
 # Node
 frontends/node_modules/
+node/node_modules/
+node/artifacts/
+
+# Compiled native addons (built by CI, never committed)
+*.node
+
+# Python bindings build output & bytecode
+python/dist/
+**/__pycache__/
+*.egg-info/
 
 # macOS
 .DS_Store

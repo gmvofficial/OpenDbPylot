@@ -22,7 +22,7 @@ npm run build
 # Start server in background
 echo "Starting server..."
 cd "$ROOT"
-cargo run --bin server &
+cargo run -- serve --headless &
 SERVER_PID=$!
 
 # Wait until server responds, then open browser

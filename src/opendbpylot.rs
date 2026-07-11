@@ -7,9 +7,12 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use tokio::sync::OnceCell;
+
 use crate::conversation::ConversationStore;
 use crate::llm::LlmService;
-use crate::prompt::build_sql_prompt;
+use crate::prompt::{build_repair_prompt, build_sql_prompt};
+use crate::schema::SchemaIndex;
 use crate::sql::{extract_sql, is_sql_valid};
 use crate::sqlrunner::{QueryResult, SqlRunner};
 use crate::types::QuestionSql;
@@ -26,6 +29,18 @@ pub struct OpenDbPylotConfig {
     pub allow_llm_to_see_data: bool,
     /// How many prior conversation turns to include as context for follow-ups.
     pub history_limit: usize,
+    /// How many times a failing generated query may be sent back to the LLM
+    /// (with the error message) for correction before giving up.
+    /// 0 disables self-repair.
+    pub max_sql_repairs: usize,
+    /// Approximate token budget for the assembled prompt. Context sections are
+    /// added highest-priority-first (DDL → docs → examples → history) and the
+    /// rest is dropped, so a large schema can't overflow the model's context.
+    pub max_prompt_tokens: usize,
+    /// When true, `ask` makes one extra bounded LLM call to produce a short
+    /// natural-language answer alongside the rows (`AskResult::answer`).
+    /// Off by default — it doubles LLM calls, so callers opt in.
+    pub summarize_results: bool,
 }
 
 impl Default for OpenDbPylotConfig {
@@ -38,6 +53,9 @@ impl Default for OpenDbPylotConfig {
             auto_train: false,
             allow_llm_to_see_data: false,
             history_limit: 5,
+            max_sql_repairs: 2,
+            max_prompt_tokens: crate::prompt::DEFAULT_MAX_PROMPT_TOKENS,
+            summarize_results: false,
         }
     }
 }
@@ -47,6 +65,11 @@ impl Default for OpenDbPylotConfig {
 pub struct AskResult {
     pub sql: String,
     pub result: Option<QueryResult>,
+    /// How many self-repair round-trips were needed (0 = first attempt worked).
+    pub repairs_used: usize,
+    /// A short natural-language answer, present only when `summarize_results` is
+    /// enabled and the query returned rows. Best-effort — `None` on any failure.
+    pub answer: Option<String>,
 }
 
 pub struct OpenDbPylot {
@@ -55,6 +78,10 @@ pub struct OpenDbPylot {
     runner: Option<Arc<dyn SqlRunner>>,
     conversations: Option<Arc<dyn ConversationStore>>,
     config: OpenDbPylotConfig,
+    /// Lazily introspected database schema, used for pre-execution validation.
+    /// Cached for the lifetime of this instance (instances are rebuilt on
+    /// reconnect/settings changes).
+    schema_index: OnceCell<SchemaIndex>,
 }
 
 impl OpenDbPylot {
@@ -65,6 +92,7 @@ impl OpenDbPylot {
             runner: None,
             conversations: None,
             config: OpenDbPylotConfig::default(),
+            schema_index: OnceCell::new(),
         }
     }
 
@@ -150,6 +178,13 @@ impl OpenDbPylot {
         let question_sql_list = self.store.get_similar_question_sql(question).await?;
         let ddl_list = self.store.get_related_ddl(question).await?;
         let mut doc_list = self.store.get_related_documentation(question).await?;
+        tracing::debug!(
+            ddl = ddl_list.len(),
+            docs = doc_list.len(),
+            examples = question_sql_list.len(),
+            history = history.len(),
+            "retrieved context"
+        );
 
         let prompt = build_sql_prompt(
             &self.config.dialect,
@@ -158,6 +193,7 @@ impl OpenDbPylot {
             &doc_list,
             &question_sql_list,
             history,
+            self.config.max_prompt_tokens,
         );
         let response = self.llm.submit_prompt(prompt).await?;
 
@@ -187,6 +223,7 @@ impl OpenDbPylot {
                     &doc_list,
                     &question_sql_list,
                     history,
+                    self.config.max_prompt_tokens,
                 );
                 let final_response = self.llm.submit_prompt(prompt).await?;
                 return Ok(extract_sql(&final_response));
@@ -239,43 +276,149 @@ impl OpenDbPylot {
         self.train_from_schema().await
     }
 
-    /// Full `ask` flow: generate SQL, run it (if a DB is
-    /// connected and the SQL is a safe read), and optionally self-train.
+    /// Full `ask` flow: generate SQL, validate + run it (if a DB is connected and
+    /// the SQL is a safe read), self-repairing failures, and optionally self-train.
     pub async fn ask(&self, question: &str) -> Result<AskResult> {
-        let sql = self.generate_sql(question).await?;
-
-        let mut result = None;
-        if let Some(runner) = &self.runner {
-            if is_sql_valid(&sql) {
-                let rows = runner.run_sql(&sql).await?;
-                // Self-learning: remember successful question/SQL pairs.
-                if self.config.auto_train && !rows.rows.is_empty() {
-                    let _ = self.store.add_question_sql(question, &sql).await;
-                }
-                result = Some(rows);
+        let mut out = self.ask_core(question, &[]).await?;
+        // Self-learning: remember successful question/SQL pairs.
+        if let Some(rows) = &out.result {
+            if self.config.auto_train && !rows.rows.is_empty() {
+                let _ = self.store.add_question_sql(question, &out.sql).await;
             }
         }
-
-        Ok(AskResult { sql, result })
+        self.maybe_summarize(question, &mut out).await;
+        Ok(out)
     }
 
     /// Like `ask`, but conversation-aware: includes prior turns as context and
     /// records this turn so later follow-ups can reference it.
     pub async fn ask_in_conversation(&self, conversation_id: &str, question: &str) -> Result<AskResult> {
-        let sql = self.generate_sql_in_conversation(conversation_id, question).await?;
-
-        let mut result = None;
-        if let Some(runner) = &self.runner {
-            if is_sql_valid(&sql) {
-                let rows = runner.run_sql(&sql).await?;
-                if !rows.rows.is_empty() {
-                    self.record_turn(conversation_id, question, &sql).await;
-                }
-                result = Some(rows);
+        let history = match &self.conversations {
+            Some(store) => store.recent(conversation_id, self.config.history_limit).await?,
+            None => Vec::new(),
+        };
+        let mut out = self.ask_core(question, &history).await?;
+        if let Some(rows) = &out.result {
+            if !rows.rows.is_empty() {
+                self.record_turn(conversation_id, question, &out.sql).await;
             }
         }
+        self.maybe_summarize(question, &mut out).await;
+        Ok(out)
+    }
 
-        Ok(AskResult { sql, result })
+    /// Fill `out.answer` with a short natural-language takeaway when
+    /// `summarize_results` is on and there are rows. Best-effort: a failed or
+    /// empty summary leaves `answer = None` and never affects the query result.
+    async fn maybe_summarize(&self, question: &str, out: &mut AskResult) {
+        if !self.config.summarize_results {
+            return;
+        }
+        let Some(rows) = &out.result else { return };
+        if rows.rows.is_empty() {
+            return;
+        }
+        // Bound the tokens: summarize from at most the first 20 rows.
+        let preview = QueryResult {
+            columns: rows.columns.clone(),
+            rows: rows.rows.iter().take(20).cloned().collect(),
+        };
+        let prompt = crate::prompt::build_summary_prompt(question, &out.sql, &preview.to_text());
+        match self.llm.submit_prompt(prompt).await {
+            Ok(text) if !text.trim().is_empty() => {
+                out.answer = Some(text.trim().to_string());
+            }
+            Ok(_) => {}
+            Err(e) => tracing::debug!(error = %e, "result summary failed (ignored)"),
+        }
+    }
+
+    /// The shared ask path with the **self-repair loop**:
+    ///
+    /// ```text
+    /// generate → schema-validate ──issues──▶ repair prompt ─▶ regenerate ─▶ (loop)
+    ///                │ ok                          ▲
+    ///                ▼                             │ error
+    ///             execute ──────────────────────────
+    ///                │ ok
+    ///                ▼
+    ///              rows
+    /// ```
+    ///
+    /// Schema validation catches hallucinated tables/columns *before* touching
+    /// the database; execution errors are fed back verbatim. After
+    /// `max_sql_repairs` failed corrections the last error is returned honestly —
+    /// never a silently-broken result.
+    async fn ask_core(&self, question: &str, history: &[QuestionSql]) -> Result<AskResult> {
+        let mut sql = self.generate_sql_inner(question, history).await?;
+        let mut repairs_used = 0usize;
+        tracing::debug!(%sql, "generated sql");
+
+        let Some(runner) = self.runner.as_ref() else {
+            return Ok(AskResult { sql, result: None, repairs_used, answer: None });
+        };
+
+        loop {
+            // Not a runnable read (e.g. the model replied with an explanation
+            // instead of SQL) — return it as-is for the caller to display.
+            if !is_sql_valid(&sql) {
+                tracing::debug!(%sql, "not a runnable read; returning as-is");
+                return Ok(AskResult { sql, result: None, repairs_used, answer: None });
+            }
+
+            // Cheap static check first: hallucinated tables/columns never reach
+            // the database. Falls back to execution when it can't be sure.
+            let issues = self.schema().await.validate(&sql, &self.config.dialect);
+            let error = if !issues.is_empty() {
+                issues.join("; ")
+            } else {
+                match runner.run_sql(&sql).await {
+                    Ok(rows) => {
+                        tracing::debug!(rows = rows.rows.len(), repairs = repairs_used, "query succeeded");
+                        return Ok(AskResult { sql, result: Some(rows), repairs_used, answer: None });
+                    }
+                    Err(e) => format!("{e:#}"),
+                }
+            };
+            tracing::info!(attempt = repairs_used, %error, "query failed; attempting repair");
+
+            if repairs_used >= self.config.max_sql_repairs {
+                anyhow::bail!(
+                    "SQL still failing after {repairs_used} repair attempt(s).\n\
+                     Last error: {error}\nSQL: {sql}"
+                );
+            }
+            repairs_used += 1;
+
+            let ddl_list = self.store.get_related_ddl(question).await.unwrap_or_default();
+            let prompt = build_repair_prompt(
+                &self.config.dialect,
+                question,
+                &sql,
+                &error,
+                &ddl_list,
+                self.config.max_prompt_tokens,
+            );
+            let response = self.llm.submit_prompt(prompt).await?;
+            sql = extract_sql(&response);
+        }
+    }
+
+    /// Lazily introspect the connected database into a [`SchemaIndex`], cached
+    /// for this instance's lifetime. Unavailable introspection (no runner, or a
+    /// backend without it) yields an empty index — validation becomes a no-op.
+    async fn schema(&self) -> &SchemaIndex {
+        self.schema_index
+            .get_or_init(|| async {
+                match &self.runner {
+                    Some(runner) => match runner.introspect_schema().await {
+                        Ok(ddl) => SchemaIndex::from_ddl(&ddl, &self.config.dialect),
+                        Err(_) => SchemaIndex::empty(),
+                    },
+                    None => SchemaIndex::empty(),
+                }
+            })
+            .await
     }
 
     /// Record a successful turn: append it to the conversation (for follow-ups)
@@ -323,12 +466,132 @@ mod tests {
                 dialect: "SQLite".into(),
                 auto_train: false,
                 allow_llm_to_see_data: true,
-                history_limit: 5,
+                ..Default::default()
             },
         );
 
         let sql = opendbpylot.generate_sql("how many USA users?").await.unwrap();
         assert_eq!(sql, "SELECT COUNT(*) FROM users WHERE country = 'USA';");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Fresh temp SQLite DB with a small `users` table.
+    async fn temp_users_db(tag: &str) -> (SqliteRunner, std::path::PathBuf) {
+        let path = std::env::temp_dir().join(format!(
+            "opendbpylot_{tag}_{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let db = SqliteRunner::new(path.to_string_lossy().to_string());
+        db.run_sql("CREATE TABLE users (id INTEGER, name TEXT, country TEXT)").await.unwrap();
+        db.run_sql("INSERT INTO users VALUES (1,'Ana','USA'),(2,'Bo','UK')").await.unwrap();
+        (db, path)
+    }
+
+    #[tokio::test]
+    async fn ask_repairs_hallucinated_column_before_touching_the_db() {
+        let (db, path) = temp_users_db("repair1").await;
+
+        // First reply has a hallucinated column; the repair reply is correct.
+        let llm = Arc::new(ScriptedMockLlm::new(vec![
+            "SELECT nam FROM users;".to_string(),
+            "SELECT name FROM users;".to_string(),
+        ]));
+        let store = Arc::new(MemoryVectorStore::new(Arc::new(LocalEmbedding::new())));
+        let bot = OpenDbPylot::new(llm, store).with_runner(Arc::new(db));
+
+        let out = bot.ask("what are the user names?").await.unwrap();
+        assert_eq!(out.repairs_used, 1);
+        assert_eq!(out.sql, "SELECT name FROM users;");
+        assert_eq!(out.result.unwrap().rows.len(), 2);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn ask_repairs_execution_errors_too() {
+        let (db, path) = temp_users_db("repair2").await;
+
+        // First reply references a missing table via SQL that *parses* oddly
+        // enough to reach execution (unknown function) — the DB error comes back,
+        // the repair reply fixes it.
+        let llm = Arc::new(ScriptedMockLlm::new(vec![
+            "SELECT no_such_function(name) FROM users;".to_string(),
+            "SELECT name FROM users;".to_string(),
+        ]));
+        let store = Arc::new(MemoryVectorStore::new(Arc::new(LocalEmbedding::new())));
+        let bot = OpenDbPylot::new(llm, store).with_runner(Arc::new(db));
+
+        let out = bot.ask("names?").await.unwrap();
+        assert_eq!(out.repairs_used, 1);
+        assert!(out.result.is_some());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn ask_gives_up_honestly_after_max_repairs() {
+        let (db, path) = temp_users_db("repair3").await;
+
+        // Every reply is broken — the loop must terminate with an error, not hang
+        // or return a silently-broken result.
+        let llm = Arc::new(ScriptedMockLlm::new(vec![
+            "SELECT nam FROM users;".to_string(), // repeats forever
+        ]));
+        let store = Arc::new(MemoryVectorStore::new(Arc::new(LocalEmbedding::new())));
+        let bot = OpenDbPylot::new(llm, store).with_runner(Arc::new(db));
+
+        let err = bot.ask("names?").await.unwrap_err().to_string();
+        assert!(err.contains("2 repair attempt(s)"), "unexpected error: {err}");
+        assert!(err.contains("nam"), "error should carry the failing detail: {err}");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn repair_disabled_when_max_is_zero() {
+        let (db, path) = temp_users_db("repair0").await;
+
+        let llm = Arc::new(ScriptedMockLlm::new(vec!["SELECT nam FROM users;".to_string()]));
+        let store = Arc::new(MemoryVectorStore::new(Arc::new(LocalEmbedding::new())));
+        let bot = OpenDbPylot::new(llm, store)
+            .with_runner(Arc::new(db))
+            .with_config(OpenDbPylotConfig { max_sql_repairs: 0, ..Default::default() });
+
+        let err = bot.ask("names?").await.unwrap_err().to_string();
+        assert!(err.contains("0 repair attempt(s)"), "unexpected error: {err}");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn summary_is_produced_when_enabled_and_omitted_otherwise() {
+        use crate::llm::mock::ScriptedMockLlm;
+
+        let (db, path) = temp_users_db("summary").await;
+        let db = Arc::new(db);
+
+        // The mock returns the SQL first (for generate_sql), then the summary text
+        // on the second submit_prompt call (maybe_summarize).
+        let llm = Arc::new(ScriptedMockLlm::new(vec![
+            "SELECT name FROM users;".to_string(),
+            "There are two users.".to_string(),
+        ]));
+        let store = Arc::new(MemoryVectorStore::new(Arc::new(LocalEmbedding::new())));
+        let bot = OpenDbPylot::new(llm, store.clone())
+            .with_runner(db.clone())
+            .with_config(OpenDbPylotConfig { summarize_results: true, ..Default::default() });
+
+        let out = bot.ask("who are the users?").await.unwrap();
+        assert!(out.result.is_some());
+        assert_eq!(out.answer.as_deref(), Some("There are two users."));
+
+        // With the flag off, no summary call is made and answer stays None.
+        let llm2 = Arc::new(ScriptedMockLlm::new(vec!["SELECT name FROM users;".to_string()]));
+        let bot2 = OpenDbPylot::new(llm2, store).with_runner(db); // default: summarize off
+        let out2 = bot2.ask("who are the users?").await.unwrap();
+        assert!(out2.answer.is_none());
 
         let _ = std::fs::remove_file(&path);
     }

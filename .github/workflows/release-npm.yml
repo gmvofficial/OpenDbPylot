@@ -1,0 +1,128 @@
+name: Release npm (NAPI)
+
+# Builds the opendbpylot NAPI native addon (`.node`) for macOS, Linux, and
+# Windows (x64 + arm64 where applicable) and publishes them to npm as the
+# `opendbpylot` package plus its per-platform optional dependencies
+# (opendbpylot-darwin-arm64, …).
+#
+# The web UI is embedded at compile time from the committed
+# `frontends/dist/opendbpylot-components.js`; make sure it's fresh before tagging.
+#
+# How to release:
+#   1. Add an npm automation token as the repo secret NPM_TOKEN.
+#   2. Bump `version` in node/package.json and node/npm/*/package.json
+#      (or run `cd node && npx napi version` to sync them) and node/Cargo.toml.
+#   3. Tag and push:  git tag np-v0.1.0 && git push origin np-v0.1.0
+#
+# Run it manually (Actions tab → Run workflow) with dry_run=true to build all
+# platforms without publishing.
+
+on:
+  push:
+    tags:
+      - 'np-v*'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build all platforms but do not publish'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-13
+            target: x86_64-apple-darwin
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: napi-${{ matrix.target }}
+
+      - name: Install npm deps
+        working-directory: node
+        run: npm install
+
+      - name: Build native addon
+        working-directory: node
+        run: npx napi build --platform --release --target ${{ matrix.target }}
+
+      - name: Upload addon artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.target }}
+          path: node/*.node
+          if-no-files-found: error
+
+  publish:
+    name: Publish to npm
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install npm deps
+        working-directory: node
+        run: npm install
+
+      - name: Download all addon artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: node/artifacts
+
+      - name: Move addons into per-platform packages
+        working-directory: node
+        run: npx napi artifacts --dir artifacts
+
+      - name: List what will be published
+        working-directory: node
+        run: ls -R npm
+
+      - name: Publish (dry run)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        working-directory: node
+        run: npx napi prepublish -t npm --skip-gh-release --dry-run
+
+      - name: Publish to npm
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.dry_run) }}
+        working-directory: node
+        run: |
+          npx napi prepublish -t npm --skip-gh-release
+          npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

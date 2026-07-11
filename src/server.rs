@@ -1,7 +1,9 @@
 //! Self-serve web server: settings/vault, training, and multi-conversation chat.
 //!
-//! Run with:  cargo run --bin server   →  http://127.0.0.1:8080
-//! Configure the LLM + database from the in-app Settings sidebar (no .env needed).
+//! The whole UI (a Lit web component) is embedded in the binary at compile time,
+//! so this one server *is* the frontend + backend — a single self-contained app.
+//! [`run`] is invoked by `dbpylot serve` (opening a browser unless `--headless`).
+//! Configure the LLM + database from the in-app Settings sidebar — no `.env` needed.
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -24,14 +26,14 @@ use tokio::sync::RwLock;
 
 use tokio_stream::StreamExt;
 
-use opendbpylot::app;
-use opendbpylot::conversation::{ConversationStore, FileConversationStore};
-use opendbpylot::core::agent::{Agent, AgentEvent};
-use opendbpylot::core::tool::ToolContext;
-use opendbpylot::llm::Message as LlmMessage;
-use opendbpylot::secret::{EncryptedFileSecretStore, FileSecretStore, SecretStore};
-use opendbpylot::settings::Settings;
-use opendbpylot::opendbpylot::OpenDbPylot;
+use crate::app;
+use crate::conversation::{ConversationStore, FileConversationStore};
+use crate::core::agent::{Agent, AgentEvent};
+use crate::core::tool::ToolContext;
+use crate::llm::Message as LlmMessage;
+use crate::secret::{EncryptedFileSecretStore, FileSecretStore, SecretStore};
+use crate::settings::Settings;
+use crate::opendbpylot::OpenDbPylot;
 
 struct AppCore {
     settings: Settings,
@@ -53,8 +55,10 @@ fn api_err<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Boot the web app on `127.0.0.1:8080`. When `open_browser` is true, opens the
+/// user's default browser at the URL once the listener is up.
+pub async fn run(open_browser: bool) -> Result<()> {
+    app::init_tracing();
     let mut settings = Settings::load(&app::home().join("settings.json"));
 
     // Default: AES-256-GCM encrypted file vault — no keychain prompts.
@@ -100,7 +104,7 @@ async fn main() -> Result<()> {
         .route("/api/train", post(train))
         .route("/api/learn_schema", post(learn_schema))
         .route("/api/conversations", get(list_conversations).post(new_conversation))
-        .route("/api/conversations/:id", get(get_conversation))
+        .route("/api/conversations/:id", get(get_conversation).delete(delete_conversation))
         .route("/api/opendbpylot/v2/starter", get(starter))
         .route("/api/opendbpylot/v2/chat_sse", post(chat_sse))
         .route("/api/opendbpylot/v2/chat_poll", post(chat_poll))
@@ -108,10 +112,30 @@ async fn main() -> Result<()> {
         .with_state(state);
 
     let addr = "127.0.0.1:8080";
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    println!("opendbpylot app running on http://{addr}");
+    let url = format!("http://{addr}");
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| anyhow::anyhow!("could not bind {addr} (is opendbpylot already running?): {e}"))?;
+    println!("opendbpylot is running at {url}");
+    println!("Open Settings there to choose an LLM and connect your database.");
+    if open_browser {
+        open_in_browser(&url);
+    }
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Best-effort: open `url` in the OS default browser. Never fails the server.
+fn open_in_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    let cmd = ("open", vec![url]);
+    #[cfg(target_os = "windows")]
+    let cmd = ("cmd", vec!["/C", "start", url]);
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let cmd = ("xdg-open", vec![url]);
+    if std::process::Command::new(cmd.0).args(&cmd.1).spawn().is_err() {
+        eprintln!("(couldn't auto-open a browser — visit {url} manually)");
+    }
 }
 
 /// Outcome of connecting to the database and (if needed) importing its schema.
@@ -158,15 +182,13 @@ async fn index() -> Html<&'static str> {
 }
 
 async fn components_js() -> impl IntoResponse {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/frontends/dist/opendbpylot-components.js");
-    match std::fs::read_to_string(path) {
-        Ok(js) => ([("content-type", "application/javascript; charset=utf-8")], js).into_response(),
-        Err(_) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Bundle not built — run: cd frontends && npm install && npm run build",
-        )
-            .into_response(),
-    }
+    // Embedded at compile time so the binary is fully self-contained — the web UI
+    // works even when installed via `cargo install` (no source tree at runtime).
+    const JS: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/frontends/dist/opendbpylot-components.js"
+    ));
+    ([("content-type", "application/javascript; charset=utf-8")], JS).into_response()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -178,14 +200,15 @@ async fn providers() -> Json<Value> {
         "providers": [
             { "id": "openai",    "label": "OpenAI",            "needs_key": true,  "default_model": "gpt-4o-mini" },
             { "id": "anthropic", "label": "Anthropic (Claude)", "needs_key": true,  "default_model": "claude-sonnet-4-5" },
-            { "id": "ollama",    "label": "Ollama (local, no API key)", "needs_key": false, "default_model": "llama3" },
-            { "id": "mock",      "label": "Demo mode (offline, fixed sample query — not real AI)", "needs_key": false, "default_model": "" }
+            { "id": "ollama",    "label": "Ollama (local, no API key)", "needs_key": false, "default_model": "llama3" }
         ]
     }))
 }
 
 fn status_json(core: &AppCore) -> Value {
-    let key_set = matches!(core.settings.provider.as_str(), "ollama" | "mock")
+    // Only Ollama is genuinely keyless; everything else must have a stored key
+    // before the app may claim to be set up.
+    let key_set = core.settings.provider == "ollama"
         || core.secrets.get(&core.settings.provider).ok().flatten().is_some();
     // Mask password in connection string for the API response.
     let masked_conn = mask_connection_string(&core.settings.db_connection_string);
@@ -197,6 +220,9 @@ fn status_json(core: &AppCore) -> Value {
         "db_connection_string": masked_conn,
         "key_set": key_set,
         "ready": core.opendbpylot.is_some(),
+        // Compile-time features the UI should adapt to (e.g. only offer DuckDB
+        // when this build can actually connect to it).
+        "duckdb_available": cfg!(feature = "duckdb"),
     })
 }
 
@@ -336,6 +362,14 @@ async fn get_conversation(State(state): State<AppState>, Path(id): Path<String>)
         .map(|t| json!({ "question": t.question, "sql": t.sql }))
         .collect();
     Json(json!({ "id": id, "messages": messages }))
+}
+
+async fn delete_conversation(State(state): State<AppState>, Path(id): Path<String>) -> Json<Value> {
+    let convs = state.core.read().await.conversations.clone();
+    match convs.delete(&id).await {
+        Ok(()) => Json(json!({ "ok": true })),
+        Err(e) => Json(json!({ "ok": false, "error": e.to_string() })),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

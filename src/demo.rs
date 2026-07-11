@@ -10,8 +10,10 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use crate::conversation::MemoryConversationStore;
-use crate::embedding::{local::LocalEmbedding, openai::OpenAiEmbedding, EmbeddingService};
-use crate::llm::{mock::MockLlm, openai::OpenAiLlm, LlmService};
+use crate::embedding::{
+    cache::CachedEmbedding, local::LocalEmbedding, openai::OpenAiEmbedding, EmbeddingService,
+};
+use crate::llm::{mock::MockLlm, openai::OpenAiLlm, retry::RetryLlm, LlmService};
 use crate::sqlrunner::{sqlite::SqliteRunner, SqlRunner};
 use crate::opendbpylot::{OpenDbPylot, OpenDbPylotConfig};
 use crate::vectorstore::memory::MemoryVectorStore;
@@ -37,8 +39,14 @@ pub async fn build_vector_store(embedding: Arc<dyn EmbeddingService>) -> Result<
 pub fn pick_providers() -> (Arc<dyn LlmService>, Arc<dyn EmbeddingService>, &'static str) {
     match std::env::var("OPENAI_API_KEY") {
         Ok(key) if !key.is_empty() => (
-            Arc::new(OpenAiLlm::new(key.clone(), "gpt-4o-mini")),
-            Arc::new(OpenAiEmbedding::new(key, "text-embedding-3-small")),
+            // Retries transient failures (timeouts, 429, 5xx) with backoff.
+            Arc::new(RetryLlm::new(Arc::new(OpenAiLlm::new(key.clone(), "gpt-4o-mini")))),
+            // File-backed cache: identical texts are only ever embedded (paid) once.
+            Arc::new(CachedEmbedding::new(
+                Arc::new(OpenAiEmbedding::new(key, "text-embedding-3-small")),
+                "openai:text-embedding-3-small",
+                Some(crate::app::home().join("cache").join("embeddings.jsonl")),
+            )),
             "OpenAI",
         ),
         _ => (
@@ -367,7 +375,11 @@ pub async fn build_demo_opendbpylot() -> Result<(OpenDbPylot, &'static str)> {
             dialect: "SQLite".into(),
             auto_train: true,
             allow_llm_to_see_data: true,
-            history_limit: 5,
+            // Opt-in NL answer above the table. Off for the offline mock (whose
+            // canned summary adds nothing); on for real providers when the user
+            // sets OPENDBPYLOT_SUMMARIZE, so we don't silently double their spend.
+            summarize_results: backend != "offline mock" && std::env::var("OPENDBPYLOT_SUMMARIZE").is_ok(),
+            ..Default::default()
         });
 
     train_demo(&opendbpylot).await?;

@@ -11,6 +11,10 @@ use serde_json::{json, Value};
 
 use super::{LlmResponse, LlmService, Message, ToolCall, ToolSchema};
 
+/// Default request timeout. Big prompts can take a while to generate; a hung
+/// request should still fail eventually instead of stalling the turn forever.
+const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Holds the config + a reusable HTTP client.
 pub struct OpenAiLlm {
     client: reqwest::Client,
@@ -21,10 +25,16 @@ pub struct OpenAiLlm {
 impl OpenAiLlm {
     pub fn new(api_key: impl Into<String>, model: impl Into<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: super::http_client(DEFAULT_TIMEOUT),
             api_key: api_key.into(),
             model: model.into(),
         }
+    }
+
+    /// Override the request timeout (from user settings).
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.client = super::http_client(timeout);
+        self
     }
 }
 

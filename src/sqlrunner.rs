@@ -9,6 +9,8 @@ pub mod sqlite;
 pub mod postgres;
 #[cfg(feature = "remote-db")]
 pub mod mysql;
+#[cfg(feature = "duckdb")]
+pub mod duckdb;
 
 use anyhow::Result;
 use async_trait::async_trait;

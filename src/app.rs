@@ -2,9 +2,10 @@
 //! vault. Used by the server so configuration can change at runtime (not via `.env`).
 //!
 //! There are two runtime objects, sharing the same LLM / vector store / SQL runner:
-//! - `OpenDbPylot`  — the legacy single-shot path (still used for training, schema import,
-//!              conversation recording).
-//! - `Agent`  — the 2.0 tool loop that powers the chat endpoint.
+//! - `OpenDbPylot` — the single-shot path (used for training, schema import, and
+//!   conversation recording).
+//! - `Agent` — the tool loop that powers the chat endpoint.
+//!
 //! Sharing the same `Arc<dyn VectorStore>` means knowledge trained via `OpenDbPylot` is
 //! immediately visible to the `Agent`'s RAG enhancer.
 
@@ -21,9 +22,16 @@ use crate::core::agent::Agent;
 use crate::core::enhancer::RagEnhancer;
 use crate::core::registry::ToolRegistry;
 use crate::core::system_prompt::build_sql_system_prompt;
-use crate::embedding::{local::LocalEmbedding, openai::OpenAiEmbedding, EmbeddingService};
+use crate::embedding::{
+    cache::CachedEmbedding, local::LocalEmbedding, openai::OpenAiEmbedding, EmbeddingService,
+};
 use crate::llm::{
-    anthropic::AnthropicLlm, mock::MockLlm, ollama::OllamaLlm, openai::OpenAiLlm, LlmService,
+    anthropic::AnthropicLlm,
+    mock::MockLlm,
+    ollama::OllamaLlm,
+    openai::OpenAiLlm,
+    retry::{RetryLlm, RetryPolicy},
+    LlmService,
 };
 use crate::secret::SecretStore;
 use crate::settings::Settings;
@@ -42,6 +50,7 @@ fn db_identity(settings: &Settings) -> String {
         "postgres" | "postgresql" | "mysql" | "mariadb" => {
             format!("{}:{}", settings.db_kind, settings.db_connection_string)
         }
+        "duckdb" => format!("duckdb:{}", settings.db_path),
         _ => format!("sqlite:{}", settings.db_path),
     }
 }
@@ -59,6 +68,7 @@ fn dialect_for(db_kind: &str) -> &'static str {
     match db_kind {
         "postgres" | "postgresql" => "PostgreSQL",
         "mysql" | "mariadb" => "MySQL",
+        "duckdb" => "DuckDB",
         _ => "SQLite",
     }
 }
@@ -83,9 +93,32 @@ pub fn build_runner(settings: &Settings) -> Result<Arc<dyn SqlRunner>> {
             }
             Ok(Arc::new(MySqlRunner::new(settings.db_connection_string.clone())))
         }
+        #[cfg(feature = "duckdb")]
+        "duckdb" => {
+            use crate::sqlrunner::duckdb::DuckDbRunner;
+            // db_path may be a .duckdb file or ":memory:"; querying CSV/Parquet
+            // happens inside the SQL itself (`SELECT * FROM 'data.csv'`).
+            Ok(Arc::new(DuckDbRunner::new(settings.db_path.clone())?))
+        }
+        // Selected but not compiled in — fail loudly rather than silently using SQLite.
+        #[cfg(not(feature = "duckdb"))]
+        "duckdb" => Err(anyhow::anyhow!(
+            "db_kind is 'duckdb' but this build lacks the feature — \
+             reinstall with: cargo install opendbpylot --features duckdb"
+        )),
         // Default: SQLite
         _ => Ok(Arc::new(SqliteRunner::new(settings.db_path.clone()))),
     }
+}
+
+/// Initialize logging/tracing once. Silent by default (only warnings and above);
+/// set `OPENDBPYLOT_LOG` to control verbosity, e.g. `OPENDBPYLOT_LOG=debug` to
+/// trace the retrieve → prompt → validate → execute → repair pipeline.
+/// Idempotent — safe to call from every binary entry point.
+pub fn init_tracing() {
+    use tracing_subscriber::{fmt, EnvFilter};
+    let filter = EnvFilter::try_from_env("OPENDBPYLOT_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
+    let _ = fmt().with_env_filter(filter).with_target(false).without_time().try_init();
 }
 
 /// Per-user data directory (`$OPENDBPYLOT_HOME` or `~/.opendbpylot`), created if needed.
@@ -122,27 +155,106 @@ fn build_components(settings: &Settings, secrets: &dyn SecretStore) -> Result<Op
     let model = settings.effective_model();
     let openai_key = secrets.get("openai")?;
 
+    // 0 = keep the per-provider default timeout.
+    let timeout = (settings.llm_timeout_secs > 0)
+        .then(|| std::time::Duration::from_secs(settings.llm_timeout_secs));
+
     let llm: Arc<dyn LlmService> = match settings.provider.as_str() {
         "openai" => match openai_key.clone() {
-            Some(k) => Arc::new(OpenAiLlm::new(k, model)),
+            Some(k) => {
+                let mut p = OpenAiLlm::new(k, model);
+                if let Some(t) = timeout {
+                    p = p.with_timeout(t);
+                }
+                Arc::new(p)
+            }
             None => return Ok(None),
         },
         "anthropic" => match secrets.get("anthropic")? {
-            Some(k) => Arc::new(AnthropicLlm::new(k, model)),
+            Some(k) => {
+                let mut p = AnthropicLlm::new(k, model);
+                if let Some(t) = timeout {
+                    p = p.with_timeout(t);
+                }
+                Arc::new(p)
+            }
             None => return Ok(None),
         },
-        "ollama" => Arc::new(OllamaLlm::new(model)),
-        _ => Arc::new(MockLlm::with_default_sql()),
+        "ollama" => {
+            let mut p = OllamaLlm::new(model);
+            if let Some(t) = timeout {
+                p = p.with_timeout(t);
+            }
+            Arc::new(p)
+        }
+        // Internal/testing provider — reachable via the API for automated smoke
+        // tests, but deliberately NOT offered in the UI (see /api/providers).
+        "mock" => Arc::new(MockLlm::with_default_sql()),
+        // Unknown or unset provider → the app is simply not configured yet.
+        // Never silently fall back to the mock: a user must never mistake
+        // canned demo output for their real database.
+        _ => return Ok(None),
     };
 
-    // Semantic embeddings when an OpenAI key exists (and we're not in offline mock
-    // mode), else the local keyword embedder.
-    let use_openai_embeddings = settings.provider != "mock" && openai_key.is_some();
-    let (embedding, embedder_tag): (Arc<dyn EmbeddingService>, &str) = if use_openai_embeddings {
-        (Arc::new(OpenAiEmbedding::new(openai_key.unwrap(), "text-embedding-3-small")), "openai")
+    // Transient-failure retries (timeouts, 429, 5xx) for real providers.
+    // The mock stays bare — retrying it would only mask test bugs.
+    let llm: Arc<dyn LlmService> = if settings.provider == "mock" {
+        llm
     } else {
-        (Arc::new(LocalEmbedding::new()), "local")
+        Arc::new(RetryLlm::new(llm).with_policy(RetryPolicy {
+            max_retries: settings.llm_max_retries,
+            ..RetryPolicy::default()
+        }))
     };
+
+    // Embedding backend per `settings.embedding_provider`:
+    //   "auto"      — OpenAI when a key exists (and not mock mode), else local.
+    //   "local"     — offline hashed bag-of-words (no downloads, no key).
+    //   "openai"    — hosted embeddings (requires the OpenAI key).
+    //   "fastembed" — real local semantic model (needs the compile feature).
+    // Non-free backends get a file-backed cache so identical texts are only
+    // ever embedded once.
+    let cache_path = home().join("cache").join("embeddings.jsonl");
+    let openai_embedder = |key: String| -> Arc<dyn EmbeddingService> {
+        Arc::new(CachedEmbedding::new(
+            Arc::new(OpenAiEmbedding::new(key, "text-embedding-3-small")),
+            "openai:text-embedding-3-small",
+            Some(cache_path.clone()),
+        ))
+    };
+    let (embedding, embedder_tag): (Arc<dyn EmbeddingService>, &str) =
+        match settings.embedding_provider.as_str() {
+            "local" => (Arc::new(LocalEmbedding::new()), "local"),
+            "openai" => match openai_key.clone() {
+                Some(k) => (openai_embedder(k), "openai"),
+                None => anyhow::bail!(
+                    "embedding_provider is 'openai' but no OpenAI API key is stored"
+                ),
+            },
+            "fastembed" => {
+                #[cfg(feature = "fastembed")]
+                {
+                    (
+                        Arc::new(CachedEmbedding::new(
+                            Arc::new(crate::embedding::fastembed::FastEmbedding::new()?),
+                            "fastembed:all-minilm-l6-v2",
+                            Some(cache_path.clone()),
+                        )),
+                        "fastembed",
+                    )
+                }
+                #[cfg(not(feature = "fastembed"))]
+                anyhow::bail!(
+                    "embedding_provider is 'fastembed' but this build lacks the feature — \
+                     reinstall with: cargo install opendbpylot --features fastembed"
+                )
+            }
+            // "auto" and anything unknown: previous behavior.
+            _ => match openai_key.clone() {
+                Some(k) if settings.provider != "mock" => (openai_embedder(k), "openai"),
+                _ => (Arc::new(LocalEmbedding::new()), "local"),
+            },
+        };
 
     // KB file is namespaced by embedder (vector dims) AND database (per-DB schema).
     let kb_file = kb_filename(embedder_tag, settings);

@@ -1,0 +1,71 @@
+{
+  "name": "opendbpylot",
+  "version": "0.1.0",
+  "description": "opendbpylot — natural-language → SQL via Retrieval-Augmented Generation (Node.js / NAPI bindings)",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "Apache-2.0",
+  "author": "Global Mind Venture",
+  "homepage": "https://github.com/gmvofficial/OpenDbPylot#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gmvofficial/OpenDbPylot.git"
+  },
+  "bugs": {
+    "url": "https://github.com/gmvofficial/OpenDbPylot/issues"
+  },
+  "keywords": [
+    "nl2sql",
+    "text-to-sql",
+    "rag",
+    "llm",
+    "sql",
+    "database",
+    "rust",
+    "napi"
+  ],
+  "engines": {
+    "node": ">=16"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "dbpylot": "js/cli.js"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "js/cli.js",
+    "*.node"
+  ],
+  "napi": {
+    "name": "opendbpylot",
+    "triples": {
+      "defaults": false,
+      "additional": [
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-unknown-linux-gnu",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "napi build --release --platform",
+    "build:debug": "napi build --platform",
+    "artifacts": "napi artifacts",
+    "prepublishOnly": "napi prepublish -t npm --skip-gh-release"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.0"
+  },
+  "optionalDependencies": {
+    "opendbpylot-darwin-x64": "0.1.0",
+    "opendbpylot-darwin-arm64": "0.1.0",
+    "opendbpylot-linux-x64-gnu": "0.1.0",
+    "opendbpylot-linux-arm64-gnu": "0.1.0",
+    "opendbpylot-win32-x64-msvc": "0.1.0"
+  }
+}

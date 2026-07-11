@@ -1,4 +1,6 @@
-//! In-memory vector store. Holds everything in RAM and ranks by cosine similarity.
+//! In-memory vector store. Holds everything in RAM and ranks with hybrid
+//! retrieval (BM25 keywords + embedding cosine, fused by RRF — see
+//! [`crate::retrieval`]).
 //!
 //! A simple in-memory store with zero setup. For production you'd
 //! implement [`VectorStore`] again for a persistent DB (Qdrant, pgvector, ...).
@@ -9,7 +11,8 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use super::VectorStore;
-use crate::embedding::{cosine_similarity, EmbeddingService};
+use crate::embedding::EmbeddingService;
+use crate::retrieval::hybrid_top_n;
 use crate::types::QuestionSql;
 
 /// One stored item plus its precomputed embedding.
@@ -43,16 +46,15 @@ impl MemoryVectorStore {
         self
     }
 
-    /// Return the indexes of the top-`n` entries most similar to `query_emb`.
-    fn top_n(entries: &[Entry], query_emb: &[f32], n: usize) -> Vec<usize> {
-        let mut scored: Vec<(usize, f32)> = entries
+    /// Hybrid-rank entries against the query; returns top-`n` indices.
+    /// For Q/SQL pairs the *question* is the searchable text, not the SQL.
+    fn top_n(entries: &[Entry], query_text: &str, query_emb: &[f32], n: usize) -> Vec<usize> {
+        let texts: Vec<&str> = entries
             .iter()
-            .enumerate()
-            .map(|(i, e)| (i, cosine_similarity(query_emb, &e.embedding)))
+            .map(|e| e.question.as_deref().unwrap_or(&e.content))
             .collect();
-        // Highest similarity first.
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        scored.into_iter().take(n).map(|(i, _)| i).collect()
+        let embs: Vec<&[f32]> = entries.iter().map(|e| e.embedding.as_slice()).collect();
+        hybrid_top_n(query_text, query_emb, &texts, &embs, n)
     }
 }
 
@@ -98,21 +100,21 @@ impl VectorStore for MemoryVectorStore {
     async fn get_related_ddl(&self, question: &str) -> Result<Vec<String>> {
         let query = self.embedding.embed(question).await?;
         let guard = self.ddl.lock().unwrap();
-        let idxs = Self::top_n(guard.as_slice(), &query, self.n_results);
+        let idxs = Self::top_n(guard.as_slice(), question, &query, self.n_results);
         Ok(idxs.into_iter().map(|i| guard[i].content.clone()).collect())
     }
 
     async fn get_related_documentation(&self, question: &str) -> Result<Vec<String>> {
         let query = self.embedding.embed(question).await?;
         let guard = self.docs.lock().unwrap();
-        let idxs = Self::top_n(guard.as_slice(), &query, self.n_results);
+        let idxs = Self::top_n(guard.as_slice(), question, &query, self.n_results);
         Ok(idxs.into_iter().map(|i| guard[i].content.clone()).collect())
     }
 
     async fn get_similar_question_sql(&self, question: &str) -> Result<Vec<QuestionSql>> {
         let query = self.embedding.embed(question).await?;
         let guard = self.sql.lock().unwrap();
-        let idxs = Self::top_n(guard.as_slice(), &query, self.n_results);
+        let idxs = Self::top_n(guard.as_slice(), question, &query, self.n_results);
         Ok(idxs
             .into_iter()
             .map(|i| QuestionSql {

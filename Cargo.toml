@@ -3,8 +3,26 @@ name = "opendbpylot"
 version = "0.1.0"
 edition = "2021"
 description = "Natural-language-to-SQL via Retrieval-Augmented Generation, in Rust"
-license = "MIT"
-default-run = "opendbpylot"
+license = "Apache-2.0"
+authors = ["Global Mind Venture <globalmindventure.official@gmail.com>"]
+readme = "README.md"
+keywords = ["nl2sql", "text-to-sql", "rag", "llm", "sql"]
+categories = ["command-line-utilities", "database"]
+repository = "https://github.com/gmvofficial/OpenDbPylot"
+homepage = "https://github.com/gmvofficial/OpenDbPylot"
+default-run = "dbpylot"
+# The language bindings and CI are their own crates/tooling — keep them out of
+# the published crates.io package (they'd otherwise bloat it and confuse cargo).
+exclude = ["python", "node", ".github", "frontends/node_modules", "frontends/src"]
+
+# The single user-facing binary is `dbpylot` (from src/bin/dbpylot.rs). The crate
+# is named `opendbpylot`; the short command name matches the OpenPylot family.
+
+# gen_demo is a dev-only helper for regenerating the sample database. Gating it
+# behind a feature keeps it out of `cargo install` for end users.
+[[bin]]
+name = "gen_demo"
+required-features = ["gen-demo"]
 
 [dependencies]
 # Async runtime — lets us do network + DB calls without blocking.
@@ -61,9 +79,19 @@ qdrant-client = { version = "1.11", optional = true }
 # Remote database support: PostgreSQL + MySQL via sqlx.
 # Use runtime-tokio-rustls to stay consistent with reqwest's rustls-tls.
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "mysql"], default-features = false, optional = true }
+sqlparser = { version = "0.62.0", features = ["visitor"] }
+fastembed = { version = "5.17.2", optional = true }
+duckdb = { version = "1.10504.0", features = ["bundled"], optional = true }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+clap = { version = "4.6.1", features = ["derive"] }
 
 [features]
 default = ["remote-db"]
 remote-db = ["dep:sqlx"]
 qdrant    = ["dep:qdrant-client"]
 keychain  = ["dep:keyring"]
+# Enables the dev-only `gen_demo` binary: cargo run --features gen-demo --bin gen_demo
+gen-demo  = []
+fastembed = ["dep:fastembed"]
+duckdb = ["dep:duckdb"]

@@ -31,7 +31,7 @@ const MAGENTA: &str = "#bf1363";
 
 /// Is every cell in column `j` a number?
 fn col_is_numeric(rows: &[Vec<String>], j: usize) -> bool {
-    !rows.is_empty() && rows.iter().all(|r| r.get(j).map_or(false, |c| c.trim().parse::<f64>().is_ok()))
+    !rows.is_empty() && rows.iter().all(|r| r.get(j).is_some_and(|c| c.trim().parse::<f64>().is_ok()))
 }
 
 /// Does column `j` look like a date/time axis (by name or `YYYY-MM[-DD]` values)?
@@ -43,7 +43,7 @@ fn col_is_temporal(name: &str, rows: &[Vec<String>], j: usize) -> bool {
     {
         return true;
     }
-    rows.iter().take(6).all(|r| r.get(j).map_or(false, |c| looks_like_year_month(c)))
+    rows.iter().take(6).all(|r| r.get(j).is_some_and(|c| looks_like_year_month(c)))
 }
 
 fn looks_like_year_month(s: &str) -> bool {

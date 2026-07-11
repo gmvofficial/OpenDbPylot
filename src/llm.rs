@@ -8,11 +8,25 @@ pub mod anthropic;
 pub mod mock;
 pub mod ollama;
 pub mod openai;
+pub mod retry;
+
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// Shared HTTP client builder: request timeout + connect timeout, so a hung
+/// provider can't stall a turn forever.
+pub(crate) fn http_client(timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(Duration::from_secs(10))
+        .build()
+        // Building only fails on invalid TLS/system config; fall back to defaults.
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
 
 /// One turn in a conversation sent to the LLM.
 ///

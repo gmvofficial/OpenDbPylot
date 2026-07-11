@@ -1,0 +1,20 @@
+[package]
+name = "opendbpylot-python-bindings"
+version = "0.1.0"
+edition = "2021"
+description = "Python bindings for opendbpylot — natural-language → SQL via RAG"
+license = "Apache-2.0"
+repository = "https://github.com/gmvofficial/OpenDbPylot"
+publish = false
+
+[lib]
+name = "opendbpylot"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+
+# The main library crate (path-based; the workflow builds from this repo).
+opendbpylot = { path = "..", package = "opendbpylot" }

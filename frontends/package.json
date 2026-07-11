@@ -1,9 +1,9 @@
 {
   "name": "opendbpylot-webcomponent",
   "version": "0.1.0",
-  "description": "OpenDbPylot-style Lit web component for opendbpylot (natural language -> SQL)",
+  "description": "Lit web component for opendbpylot (natural language -> SQL)",
   "type": "module",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "scripts": {
     "dev": "vite",
     "build": "vite build"
