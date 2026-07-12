@@ -1,6 +1,6 @@
 [package]
 name = "opendbpylot-node-bindings"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Node.js bindings for opendbpylot — natural-language → SQL via RAG"
 license = "Apache-2.0"
