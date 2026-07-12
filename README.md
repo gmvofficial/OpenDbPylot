@@ -1,270 +1,184 @@
-# 🦀 opendbpylot
+# opendbpylot
 
-**Natural-language → SQL → answers, in Rust.**
+Ask your database questions in plain English and get back SQL, results, and charts.
 
 [![crates.io](https://img.shields.io/crates/v/opendbpylot.svg)](https://crates.io/crates/opendbpylot)
 [![docs.rs](https://docs.rs/opendbpylot/badge.svg)](https://docs.rs/opendbpylot)
 [![license](https://img.shields.io/crates/l/opendbpylot.svg)](LICENSE)
 
-**opendbpylot** turns a natural-language question into SQL, runs it on your database, and shows
-you the results. It uses **Retrieval-Augmented Generation (RAG)** — it "learns" your database from
-training material and retrieves the relevant pieces to help an LLM write accurate SQL.
-
-## Highlights
-
-- **Ask in plain English** → generated SQL → executed → results, with tables and charts.
-- **Self-repairing SQL** — a bad column or syntax error is validated against your schema and
-  fed back to the model for correction before it ever reaches the database.
-- **Hybrid retrieval** — BM25 keyword search fused with vector similarity, so the right tables
-  and examples land in the prompt even on messy schemas.
-- **Many databases** — SQLite, PostgreSQL, MySQL, and DuckDB (query CSV/Parquet files directly).
-- **Your choice of LLM** — OpenAI, Anthropic, or fully-local Ollama. Keys stored **encrypted**.
-- **Terminal or browser** — a single `dbpylot` command with a chat REPL, a setup wizard, and an
-  embedded web UI (frontend + backend in one binary).
-- **Read-only by design** — only `SELECT`/`WITH` queries auto-run; writes are blocked.
-- **Robust** — request timeouts, retry-with-backoff on transient failures, and a token budget
-  that keeps large schemas from overflowing the model's context.
-
-> A compact, self-contained implementation — small enough to read end-to-end.
-
-📖 **Full project documentation:** [DOCUMENTATION.md](DOCUMENTATION.md)
-
----
+opendbpylot turns a natural language question into SQL, runs it against your database, and
+returns the rows. It uses retrieval augmented generation (RAG): you train it on your schema
+and business rules, and it retrieves the relevant pieces so the model can write accurate SQL.
+Every generated query is validated against your real schema and repaired automatically before
+it runs.
 
 ## Install
 
-**As an app** (installs the `dbpylot` command):
+opendbpylot is published to three registries. Each one installs the same `dbpylot` command,
+which includes a setup wizard, a terminal chat, and an embedded web app. No Rust toolchain is
+needed for the Python or Node packages; they ship prebuilt binaries.
+
+| Registry | Command | Requires |
+| --- | --- | --- |
+| crates.io | `cargo install opendbpylot` | Rust toolchain |
+| PyPI | `pip install opendbpylot` | Python 3.9 or newer |
+| npm | `npm install -g opendbpylot` | Node 16 or newer |
+
+Once it is installed:
 
 ```bash
-cargo install opendbpylot
-
-dbpylot init                # setup wizard: choose an LLM + database
-dbpylot                     # chat with your database (interactive REPL)
-dbpylot ask "how many orders per country?"   # one-shot query
-dbpylot serve               # launch the web UI (frontend + backend), opens your browser
-dbpylot doctor              # test your LLM + database connections
-dbpylot status              # show the current configuration
-dbpylot demo                # offline demo on a seeded sample database
+dbpylot init      # configure an LLM provider and a database
+dbpylot           # chat with your database in the terminal
+dbpylot serve     # open the web app in your browser
+dbpylot ask "revenue by product category last quarter"
+dbpylot doctor    # check your LLM and database connections
+dbpylot status    # show the current configuration
+dbpylot demo      # try it offline on a sample database
 ```
 
-Run `dbpylot init` once to pick a provider (OpenAI / Anthropic / Ollama), paste a key
-(stored encrypted), and connect a database — then `dbpylot` chats with it. Prefer a GUI?
-`dbpylot serve` opens the same setup in the browser; the web UI is **embedded in the
-binary**, so it's a single self-contained frontend+backend with nothing extra to deploy.
+`dbpylot init` walks you through choosing a provider (OpenAI, Anthropic, or a local Ollama
+model), stores the API key in an encrypted vault, and connects a database. If you prefer a UI,
+`dbpylot serve` opens the same setup in the browser.
 
-**As a library** in your own Rust project:
+## Features
 
-```bash
-cargo add opendbpylot
-# optional backends:
-cargo add opendbpylot --features qdrant     # Qdrant vector store
-cargo add opendbpylot --features keychain   # OS keychain for secrets
-cargo add opendbpylot --features fastembed  # local semantic embeddings (ONNX; ~80 MB model on first use)
-cargo add opendbpylot --features duckdb     # DuckDB backend — query local CSV/Parquet directly
-```
+* Natural language to SQL over your own database.
+* Automatic query repair. Hallucinated columns and syntax errors are caught against your real
+  schema and corrected before the query runs.
+* Hybrid retrieval that combines keyword search (BM25) and vector similarity, so the right
+  tables reach the prompt even on large schemas.
+* Four databases: SQLite, PostgreSQL, MySQL, and DuckDB (query CSV and Parquet files directly).
+* Three LLM providers: OpenAI, Anthropic, or a fully local Ollama model. API keys are stored
+  encrypted, never in plain text.
+* One binary for both the CLI and the web UI. The frontend is compiled in.
+* Read only by default. Only `SELECT` and `WITH` queries run automatically; writes are blocked.
+* Resilient in production: request timeouts, automatic retries on transient failures, and a
+  prompt budget that keeps large schemas within the model's context window.
 
-By default the `remote-db` feature is on (PostgreSQL + MySQL support via `sqlx`). Disable it
-with `--no-default-features` if you only need SQLite.
+## Web app
 
----
+`dbpylot serve` starts a local web app at `http://127.0.0.1:8080` with a chat interface that
+renders SQL, result tables, and Plotly charts. The whole UI is a Lit web component compiled
+into the binary, so there is nothing extra to deploy. From the sidebar you can:
 
-## Quick start (from source)
+* Configure the LLM and database in Settings, then connect with one click.
+* Add documentation, table definitions, and example queries to train the model.
+* Keep multiple conversations that persist across restarts.
 
-```bash
-git clone https://github.com/gmvofficial/OpenDbPylot
-cd OpenDbPylot
+On first run the app opens Settings and stays disconnected until you configure a provider and a
+database, so it never returns fake answers.
 
-# 1. Set up an LLM + database, then chat with it
-cargo run -- init
-cargo run                       # interactive chat REPL
-cargo run -- ask "how many orders per country?"
+## Use as a library
 
-# 2. Prefer a browser? Launch the web UI
-cargo run -- serve
+Besides the CLI, opendbpylot is a library in all three ecosystems.
 
-# 3. Offline demo (seeded sample DB, no key needed)
-cargo run -- demo
-```
-
-### Self-serve app (no .env needed)
-
-`dbpylot serve` (or `cargo run -- serve`) → opens http://127.0.0.1:8080. From the **sidebar**:
-- **Settings** — pick an LLM (OpenAI / Anthropic / Ollama), paste an API key
-  (stored in a **secret vault**: AES-256-GCM file, or the OS keychain via
-  `OPENDBPYLOT_SECRETS`), choose a database, and **Save & connect** — which tests the
-  connection and imports the schema automatically.
-- **Train** — add documentation / DDL / question→SQL examples, or **Re-import schema**
-  after your database structure changes.
-- **Conversations** — multiple chats that **persist and remember history**; create,
-  switch, and delete them like a normal chat tool.
-
-On first run the app opens **Settings** and stays in a clear *not-connected* state
-until you pick an LLM provider (paste an API key, or choose Ollama for a fully
-local, keyless setup) and connect a database — no fake demo answers, ever.
-
-### Web component
-
-The UI is a TypeScript + **Lit** `<opendbpylot-chat>` custom element (in `frontends/`)
-that streams **rich UI components** over SSE — rendering live SQL, tables, and **Plotly
-charts**. It's compiled to a single bundle and **embedded in the binary** at build time,
-so `dbpylot serve` ships the whole app in one executable. To rebuild it from source:
-
-```bash
-cd frontends && npm install && npm run build
-```
-
-Embed it in your own page: `<opendbpylot-chat sse-endpoint="/api/opendbpylot/v2/chat_sse" theme="dark"></opendbpylot-chat>`.
-
----
-
-## Interactive CLI 🐘
-
-`dbpylot` (after `dbpylot init`) launches a friendly elephant REPL where you can type
-questions and run commands against your database. It has line editing, history (↑/↓),
-colored output, and an animated "thinking" elephant while it works.
-
-```
-  │ ❯ How many users are there per country?
-
-  SQL
-  SELECT country, COUNT(*) AS user_count FROM users GROUP BY country ORDER BY user_count DESC;
-
-  RESULT
-  country  user_count
-  ───────  ──────────
-  USA      2
-  UK       1
-  ...
-```
-
-**Commands:**
-
-| Command | Does |
-|---|---|
-| `<your question>` | ask in plain English → SQL + results |
-| `/run <SQL>` | run raw SQL directly |
-| `/tables` | show database tables + schema |
-| `/show` | list current training data |
-| `/train ddl <...>` | teach a table definition |
-| `/train doc <...>` | teach a business note |
-| `/train sql <q> \| <sql>` | teach a question/SQL example |
-| `/examples` | show example questions |
-| `/clear` · `/help` · `/quit` | screen / help / exit |
-
-One-shot (scripting): `dbpylot ask "how many users in total?"`
-
----
-
-## What you get
-
-Ask `"How many users are there per country?"` and get:
-
-```
-Generated SQL:
-SELECT country, COUNT(*) AS user_count FROM users GROUP BY country ORDER BY user_count DESC;
-
-Results:
-country | user_count
---------------------
-USA | 2
-UK | 1
-Spain | 1
-Canada | 1
-```
-
-The web UI renders the SQL and the result table in a chat interface.
-
----
-
-## How it works (the RAG pipeline)
-
-```text
-question
-  → retrieve relevant context   (similar Q/SQL, related DDL, related docs)   [vectorstore]
-  → build a prompt from context                                              [prompt]
-  → ask the LLM to write SQL                                                 [llm]
-  → extract clean SQL from the reply                                         [sql]
-  → run it on the database                                                   [sqlrunner]
-  → return rows
-```
-
-You first **train** the model:
+Rust:
 
 ```rust
-opendbpylot.train_ddl("CREATE TABLE users (id INTEGER, name TEXT, country TEXT, created_at TEXT);").await?;
-opendbpylot.train_documentation("'country' is the user's country name.").await?;
-opendbpylot.train_question_sql("How many users from each country?",
-                         "SELECT country, COUNT(*) FROM users GROUP BY country;").await?;
-```
+use opendbpylot::opendbpylot::OpenDbPylot;
 
-Then **ask**:
-
-```rust
-let answer = opendbpylot.ask("How many users are there per country?").await?;
+let answer = bot.ask("How many orders shipped last week?").await?;
 println!("{}", answer.sql);
 ```
 
----
+Python:
 
-## Architecture: swappable boxes
+```python
+import opendbpylot
 
-Every layer is a Rust **trait**, so you can swap providers without touching the core:
+bot = opendbpylot.OpenDbPylot()
+result = bot.ask("orders per country")
+print(result["sql"])
+```
 
-| Layer        | Trait              | Implementations included                          |
-|--------------|--------------------|---------------------------------------------------|
-| LLM          | `LlmService`       | `OpenAiLlm`, `AnthropicLlm`, `OllamaLlm`, `MockLlm` |
-| Embeddings   | `EmbeddingService` | `OpenAiEmbedding`, `LocalEmbedding`               |
-| Vector store | `VectorStore`      | `MemoryVectorStore`, `FileVectorStore` (persistent), `QdrantVectorStore` (`--features qdrant`) |
-| SQL runner   | `SqlRunner`        | `SqliteRunner`, `PostgresRunner` + `MySqlRunner` (`remote-db`, default), `DuckDbRunner` (`--features duckdb`; query CSV/Parquet directly) |
-| Conversations| `ConversationStore`| `MemoryConversationStore`, `FileConversationStore` (persistent) |
+Node:
 
-**Beyond generation:** a **self-repair loop** (schema validation + error feedback),
-**hybrid BM25 + vector retrieval**, auto-training from the live DB schema,
-`intermediate_sql` (let the model peek at data, opt-in via `allow_llm_to_see_data`), a
-prompt **token budget**, LLM **retries/timeouts**, and **streaming** responses over SSE
-(`POST /api/opendbpylot/v2/chat_sse`, rendered live in the web UI). Set
-`OPENDBPYLOT_LOG=debug` to trace the retrieval → SQL → execution pipeline.
+```js
+import { OpenDbPylot } from "opendbpylot";
 
-The `OpenDbPylot` struct (in [`src/opendbpylot.rs`](src/opendbpylot.rs)) wires them together — it's the
-central orchestrator that the whole pipeline hangs off of.
+const bot = new OpenDbPylot();
+console.log(bot.ask("orders per country").sql);
+```
 
----
+See [python/README.md](python/README.md) and [node/README.md](node/README.md) for the full API.
+
+## How it works
+
+```text
+question
+  1. retrieve related schema, docs, and example queries   [vector store]
+  2. assemble a prompt within a token budget              [prompt]
+  3. generate SQL                                         [llm]
+  4. validate against the schema, repair on failure      [schema + repair loop]
+  5. run read only and return rows                       [sql runner]
+```
+
+You train the model once with three kinds of material:
+
+```rust
+bot.train_ddl("CREATE TABLE orders (id INTEGER, customer_id INTEGER, status TEXT, total REAL);").await?;
+bot.train_documentation("Revenue excludes orders with status 'cancelled' or 'refunded'.").await?;
+bot.train_question_sql("orders per status", "SELECT status, COUNT(*) FROM orders GROUP BY status;").await?;
+```
+
+Training material is embedded and stored in a vector store. At query time the most relevant
+tables, docs, and examples are retrieved and assembled into the prompt.
+
+## Architecture
+
+Every layer is a Rust trait, so backends are interchangeable without touching the core.
+
+| Layer | Trait | Implementations |
+| --- | --- | --- |
+| LLM | `LlmService` | OpenAI, Anthropic, Ollama |
+| Embeddings | `EmbeddingService` | local, OpenAI, fastembed |
+| Vector store | `VectorStore` | in memory, file, Qdrant |
+| SQL runner | `SqlRunner` | SQLite, PostgreSQL, MySQL, DuckDB |
+| Conversations | `ConversationStore` | in memory, file |
+
+Optional Cargo features: `qdrant`, `keychain`, `fastembed`, and `duckdb`. PostgreSQL and MySQL
+are on by default via the `remote-db` feature; use `--no-default-features` for SQLite only.
 
 ## Project layout
 
-```
+```text
 opendbpylot/
-├── src/
-│   ├── lib.rs            crate root / module list
-│   ├── bin/dbpylot.rs    the `dbpylot` CLI (init / chat / ask / serve / doctor / status / demo)
-│   ├── server.rs         axum web server + embedded Lit UI (used by `dbpylot serve`)
-│   ├── app.rs            wiring: build the engine from settings + the secret vault
-│   ├── opendbpylot.rs    orchestrator: train() + ask() + the self-repair loop
-│   ├── prompt.rs         builds the SQL prompt within a token budget
-│   ├── schema.rs         pre-execution schema validation (sqlparser)
-│   ├── retrieval.rs      hybrid BM25 + vector ranking
-│   ├── sql.rs            extract_sql + read-only gate
-│   ├── llm.rs / llm/     LlmService trait + openai / anthropic / ollama / retry
-│   ├── embedding.rs / …  EmbeddingService trait + local / openai / cache / fastembed
-│   ├── vectorstore.rs /… VectorStore trait + memory / file / qdrant
-│   ├── sqlrunner.rs / …  SqlRunner trait + sqlite / postgres / mysql / duckdb
-│   ├── conversation.rs   ConversationStore (memory + persistent)
-│   ├── secret.rs         encrypted secret vault
-│   └── settings.rs       user settings model
-├── frontends/            TypeScript + Lit web component (compiled into the binary)
-└── Cargo.toml
+  src/
+    cli.rs           the dbpylot CLI (init, chat, ask, serve, doctor, status, demo)
+    server.rs        axum web server with the embedded UI
+    opendbpylot.rs   orchestrator: train, ask, and the repair loop
+    app.rs           builds the engine from settings and the secret vault
+    prompt.rs        assembles the prompt within a token budget
+    schema.rs        pre execution schema validation
+    retrieval.rs     hybrid BM25 and vector ranking
+    sql.rs           SQL extraction and the read only gate
+    llm/             LlmService: openai, anthropic, ollama, retry
+    embedding/       EmbeddingService: local, openai, cache, fastembed
+    vectorstore/     VectorStore: memory, file, qdrant
+    sqlrunner/       SqlRunner: sqlite, postgres, mysql, duckdb
+    conversation.rs  conversation history (memory and file)
+    secret.rs        encrypted secret vault
+    settings.rs      user settings
+    bin/dbpylot.rs   thin entry point that calls cli::run()
+  frontends/         TypeScript and Lit web component, compiled into the binary
+  python/            Python bindings (pyo3 and maturin)
+  node/              Node bindings (napi-rs)
+  tests/             cross backend integration tests
+  examples/          accuracy evaluation harness
+  .github/workflows/ release automation for crates.io, PyPI, and npm
 ```
 
----
-
-## Testing
+## Development
 
 ```bash
-cargo test                                    # unit tests (repair, schema, retrieval, retry, …)
-cargo test --test backends                    # cross-backend integration (SQLite; +DuckDB with the feature)
-cargo run --example eval                      # end-to-end accuracy eval (needs an OpenAI key)
+cargo test                    # unit tests
+cargo test --test backends    # cross backend integration tests
+cargo run -- serve            # run the web app from source
+cargo run --example eval      # accuracy benchmark (needs an OpenAI key)
 ```
+
+Full documentation is in [DOCUMENTATION.md](DOCUMENTATION.md).
 
 ## License
 
-Licensed under the [Apache License, Version 2.0](LICENSE).
+Apache 2.0. See [LICENSE](LICENSE).

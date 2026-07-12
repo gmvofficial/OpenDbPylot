@@ -1,14 +1,12 @@
-# OpenDbPylot — Project Documentation
+# opendbpylot documentation
 
-**Natural-language → SQL → answers, in Rust.**
+opendbpylot turns a plain English question into SQL, runs it against your database, and
+returns the rows. It uses retrieval augmented generation (RAG): it learns your database from
+training material (schema, docs, and example question and SQL pairs) and retrieves the most
+relevant pieces so the model can write accurate SQL.
 
-OpenDbPylot turns a plain-English question into SQL, runs it against your database, and
-returns the rows. It uses **Retrieval-Augmented Generation (RAG)**: it "learns" your
-database from training material (schema, docs, example question→SQL pairs) and retrieves
-the most relevant pieces to help an LLM write accurate SQL.
-
-This document is a complete, self-contained guide to the project: what it is, how it is
-built, how to run it, and how to extend it.
+This document is a complete guide to the project: what it is, how it is built, how to run it,
+and how to extend it.
 
 ---
 
@@ -17,17 +15,17 @@ built, how to run it, and how to extend it.
 1. [Overview](#2-overview)
 2. [Feature summary](#3-feature-summary)
 3. [Getting started](#4-getting-started)
-4. [How it works — the RAG pipeline](#5-how-it-works--the-rag-pipeline)
+4. [How it works](#5-how-it-works)
 5. [Architecture](#6-architecture)
 6. [Project layout](#7-project-layout)
 7. [The command-line app](#8-the-command-line-app)
 8. [The web app and HTTP API](#9-the-web-app-and-http-api)
-9. [Frontends](#10-frontends)
-10. [Configuration & secrets](#11-configuration--secrets)
+9. [Frontend](#10-frontend)
+10. [Configuration and secrets](#11-configuration-and-secrets)
 11. [Training your own data](#12-training-your-own-data)
-12. [Cargo features & optional backends](#13-cargo-features--optional-backends)
-13. [Building, testing & development](#14-building-testing--development)
-14. [Extending OpenDbPylot](#15-extending-opendbpylot)
+12. [Cargo features and optional backends](#13-cargo-features-and-optional-backends)
+13. [Building, testing, and development](#14-building-testing-and-development)
+14. [Extending opendbpylot](#15-extending-opendbpylot)
 15. [License](#16-license)
 
 ---
@@ -113,7 +111,7 @@ cargo run -- demo             # offline demo on a seeded sample DB (no key)
 
 ---
 
-## 5. How it works — the RAG pipeline
+## 5. How it works
 
 ```text
 question
@@ -332,7 +330,7 @@ list), `services/api-client.ts`, and `styles/` (design tokens + component styles
 
 ---
 
-## 11. Configuration & secrets
+## 11. Configuration and secrets
 
 ### Where configuration lives
 
@@ -372,7 +370,7 @@ database. With a `FileVectorStore`, training persists across runs.
 
 ---
 
-## 13. Cargo features & optional backends
+## 13. Cargo features and optional backends
 
 Defined in [`Cargo.toml`](Cargo.toml):
 
@@ -391,7 +389,7 @@ cargo build --features "qdrant keychain"
 
 ---
 
-## 14. Building, testing & development
+## 14. Building, testing, and development
 
 ```bash
 cargo build                                # build (default features)
@@ -413,7 +411,7 @@ Binaries:
 
 ---
 
-## 15. Extending OpenDbPylot
+## 15. Extending opendbpylot
 
 Because every layer is a trait, extending the system means implementing one trait and
 plugging it into the `OpenDbPylot` orchestrator:
