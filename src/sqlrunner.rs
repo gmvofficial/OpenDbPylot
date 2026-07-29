@@ -23,7 +23,7 @@ pub const MAX_ROWS: usize = 10_000;
 ///
 /// We keep everything as `String` for now so it's easy to print. A real
 /// system would keep proper types (this is where `polars` would come in).
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize)]
 pub struct QueryResult {
     pub columns: Vec<String>,
     pub rows: Vec<Vec<String>>,

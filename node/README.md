@@ -20,7 +20,12 @@ dbpylot init        # setup wizard
 dbpylot             # chat with your database
 dbpylot serve       # web UI
 dbpylot ask "how many orders per country?"
+dbpylot mcp         # serve as an MCP server for agent hosts (OpenPylot, Claude Desktop, …)
 ```
+
+`dbpylot mcp` exposes the engine over the Model Context Protocol (stdio). Secrets can be set
+non-interactively for scripted setups: `printf '%s' "$KEY" | dbpylot config set-key openai`
+and `dbpylot config set-db sqlite /data/app.db`.
 
 ## Usage (library)
 

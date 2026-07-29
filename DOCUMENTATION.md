@@ -61,6 +61,8 @@ stays clearly *not connected* until you configure a real LLM provider and a data
 - **Multiple databases:** SQLite, PostgreSQL, MySQL, and **DuckDB** (query CSV/Parquet files
   directly; enable with `--features duckdb`).
 - **Multiple LLM backends:** OpenAI, Anthropic, and Ollama (fully local, no key).
+- **MCP server** (`dbpylot mcp`) — expose the engine to agent hosts (OpenPylot, Claude
+  Desktop, …) over the Model Context Protocol; read-only and credential-safe (see §8.1).
 - **Persistent training** via a file-backed vector store, plus **auto-import of the live
   database schema** on connect (re-import manually after the structure changes).
 - **Multi-turn conversations** that persist, remember history, and can be deleted.
@@ -232,6 +234,9 @@ Installing the crate provides one command, `dbpylot`, with subcommands:
 | `dbpylot doctor` | test the configured LLM + database are reachable |
 | `dbpylot status` | print the current configuration (secrets masked) |
 | `dbpylot demo` | offline demo on a seeded sample database (no setup needed) |
+| `dbpylot mcp` | serve as an MCP server for agent hosts (see §8.1) |
+| `dbpylot config set-key <provider>` | store an LLM key from stdin (non-interactive) |
+| `dbpylot config set-db <kind> [path]` | connect a database non-interactively |
 
 The chat REPL has line editing, history (↑/↓), colored output, and an animated "thinking"
 indicator. Inside it you can also run commands:
@@ -262,6 +267,41 @@ indicator. Inside it you can also run commands:
 | `/clear` · `/help` · `/quit` | screen / help / exit |
 
 From source, prefix with `cargo run --`, e.g. `cargo run -- ask "how many users in total?"`.
+
+### 8.1 MCP server (`dbpylot mcp`)
+
+`dbpylot mcp` serves the engine over the [Model Context Protocol](https://modelcontextprotocol.io)
+on stdio, so any MCP host — OpenPylot, Claude Desktop, Claude Code, or the MCP Inspector — can
+use your database. Add it to the host's MCP configuration:
+
+```json
+{ "name": "dbpylot", "transport": "stdio", "command": "dbpylot", "args": ["mcp"] }
+```
+
+Six tools are exposed (a stable public contract):
+
+| Tool | Purpose |
+|---|---|
+| `ask_database` | natural-language question → SQL (RAG + self-repair) → rows |
+| `run_sql` | run a read-only SELECT/WITH query; writes are rejected |
+| `list_schema` | learned DDL, documentation notes, and example questions |
+| `refresh_schema` | re-introspect the live database schema |
+| `train` | teach DDL, documentation, or a question→SQL example |
+| `health` | report configured / connected status |
+
+Notes:
+
+- Uses the same configuration as the CLI. If unconfigured it still starts; tools return an
+  error pointing at `dbpylot init` — no restart needed once configured.
+- Hosts can configure it without the wizard, secrets piped via stdin (never argv or logs):
+  `printf '%s' "$KEY" | dbpylot config set-key openai` and
+  `dbpylot config set-db sqlite /data/app.db` (or a URL on stdin for postgres/mysql). The key
+  may also come from `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` in the environment (vault wins).
+- **Read-only:** `run_sql` enforces the SELECT/WITH-only gate before touching the database.
+- **Credential-safe:** tool error messages redact connection passwords, so a driver error
+  can't leak the DSN to the host (which may forward tool output to a cloud LLM).
+- Logs go to stderr (`OPENDBPYLOT_LOG=debug`); stdout carries only the JSON-RPC protocol.
+  Results are capped at 200 rows per call, with `row_count` and `truncated` reported.
 
 ---
 
