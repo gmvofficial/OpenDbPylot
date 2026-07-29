@@ -37,3 +37,4 @@ pub mod settings;
 pub mod app;
 pub mod server;
 pub mod cli;
+pub mod mcp;

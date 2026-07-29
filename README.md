@@ -34,6 +34,7 @@ dbpylot ask "revenue by product category last quarter"
 dbpylot doctor    # check your LLM and database connections
 dbpylot status    # show the current configuration
 dbpylot demo      # try it offline on a sample database
+dbpylot mcp       # serve as an MCP server for agent hosts
 ```
 
 `dbpylot init` walks you through choosing a provider (OpenAI, Anthropic, or a local Ollama
@@ -67,6 +68,54 @@ into the binary, so there is nothing extra to deploy. From the sidebar you can:
 
 On first run the app opens Settings and stays disconnected until you configure a provider and a
 database, so it never returns fake answers.
+
+## Use as an MCP server
+
+`dbpylot mcp` serves opendbpylot's capabilities over the Model Context Protocol (stdio), so
+any MCP host — OpenPylot, Claude Desktop, Claude Code, or the MCP Inspector — can chat with
+your database. Add this to your host's MCP server configuration:
+
+```json
+{ "name": "dbpylot", "transport": "stdio", "command": "dbpylot", "args": ["mcp"] }
+```
+
+(For Claude Desktop the equivalent is `"dbpylot": { "command": "dbpylot", "args": ["mcp"] }`
+under `mcpServers`.)
+
+Six tools are exposed, and their names are a stable contract:
+
+| Tool | What it does |
+| --- | --- |
+| `ask_database` | Natural-language question → SQL (RAG + self-repair) → rows |
+| `run_sql` | Run a read-only SELECT/WITH query; writes are rejected |
+| `list_schema` | Learned DDL, documentation notes, and example questions |
+| `refresh_schema` | Re-introspect the live database schema |
+| `train` | Teach DDL, documentation, or question→SQL examples |
+| `health` | Report configured/connected status |
+
+Notes:
+
+* The server uses the same configuration as the CLI (`dbpylot init`). If it isn't set up
+  yet, it still starts; tools return an error asking you to run `dbpylot init` — no restart
+  needed afterwards.
+* Host applications can configure the engine without the interactive wizard, secrets piped
+  through stdin so they never touch argv, `ps`, or shell history:
+
+  ```bash
+  printf '%s' "$OPENAI_API_KEY" | dbpylot config set-key openai
+  dbpylot config set-db sqlite /data/app.db            # file path for sqlite/duckdb
+  printf '%s' "$DATABASE_URL" | dbpylot config set-db postgres   # URL on stdin for postgres/mysql
+  ```
+
+  The API key can also come from `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` in the environment
+  (the vault always wins if both exist). OpenPylot's `pylot add dbpylot` uses `set-key` to
+  share its key automatically.
+* Query execution is read-only: `run_sql` enforces the same SELECT/WITH-only gate as the
+  web app, checked before the database is ever touched.
+* Logs go to stderr (`OPENDBPYLOT_LOG=debug` to trace); stdout carries only the protocol.
+* Tool error messages redact credentials, so a database driver error can never leak the
+  connection password to the host.
+* Results are capped at 200 rows per call, with `row_count` and `truncated` reported.
 
 ## Use as a library
 
@@ -144,8 +193,9 @@ are on by default via the `remote-db` feature; use `--no-default-features` for S
 ```text
 opendbpylot/
   src/
-    cli.rs           the dbpylot CLI (init, chat, ask, serve, doctor, status, demo)
+    cli.rs           the dbpylot CLI (init, chat, ask, serve, doctor, status, demo, mcp)
     server.rs        axum web server with the embedded UI
+    mcp.rs           MCP stdio server for agent hosts (dbpylot mcp)
     opendbpylot.rs   orchestrator: train, ask, and the repair loop
     app.rs           builds the engine from settings and the secret vault
     prompt.rs        assembles the prompt within a token budget

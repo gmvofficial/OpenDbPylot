@@ -10,6 +10,7 @@
 //!   dbpylot doctor           # test your LLM + database connections
 //!   dbpylot status           # show the current configuration
 //!   dbpylot demo             # offline demo on a seeded sample database
+//!   dbpylot mcp              # MCP stdio server for agent hosts (OpenPylot, Claude, …)
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -66,6 +67,36 @@ enum Command {
         #[arg(trailing_var_arg = true)]
         question: Vec<String>,
     },
+    /// Serve opendbpylot as an MCP stdio server (for agent hosts like
+    /// OpenPylot, Claude Desktop, or Claude Code)
+    Mcp,
+    /// Non-interactive configuration (for scripts and host applications)
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigAction {
+    /// Store an LLM API key in the encrypted vault, reading it from stdin so
+    /// it never appears in shell history or process arguments.
+    /// Example: printf '%s' "$KEY" | dbpylot config set-key openai
+    SetKey {
+        /// LLM provider: openai or anthropic (ollama is local, no key needed)
+        provider: String,
+    },
+    /// Connect a database non-interactively (for scripts and host apps).
+    /// SQLite/DuckDB take a file path argument; Postgres/MySQL read the
+    /// connection URL from stdin so the password never lands in argv:
+    ///   dbpylot config set-db sqlite /data/app.db
+    ///   printf '%s' "$DATABASE_URL" | dbpylot config set-db postgres
+    SetDb {
+        /// Database kind: sqlite, postgres, mysql, or duckdb
+        kind: String,
+        /// File path for sqlite/duckdb (omit for postgres/mysql — URL on stdin)
+        path: Option<String>,
+    },
 }
 
 /// Our mascot. 🐘
@@ -98,9 +129,16 @@ pub async fn run() -> Result<()> {
 /// Used by the Python/Node bindings to expose a fully in-process CLI.
 pub async fn run_with(args: Vec<String>) -> Result<()> {
     dotenvy::dotenv().ok();
-    crate::app::init_tracing();
+    let cli = Cli::parse_from(args);
 
-    match Cli::parse_from(args).command {
+    // The MCP server owns stdout for JSON-RPC, so its logs must go to stderr.
+    // Both initializers are first-wins (`try_init`), so pick before installing.
+    match cli.command {
+        Some(Command::Mcp) => crate::app::init_tracing_stderr(),
+        _ => crate::app::init_tracing(),
+    }
+
+    match cli.command {
         // Bare `dbpylot` → chat with the configured database.
         None => cmd_chat().await,
         Some(Command::Init) => cmd_init().await,
@@ -109,16 +147,158 @@ pub async fn run_with(args: Vec<String>) -> Result<()> {
         Some(Command::Doctor) => cmd_doctor().await,
         Some(Command::Status) => cmd_status().await,
         Some(Command::Demo { question }) => cmd_demo(&question.join(" ")).await,
+        Some(Command::Mcp) => crate::mcp::serve_stdio().await,
+        Some(Command::Config { action }) => match action {
+            ConfigAction::SetKey { provider } => cmd_set_key(&provider.to_lowercase()),
+            ConfigAction::SetDb { kind, path } => cmd_set_db(&kind.to_lowercase(), path.as_deref()),
+        },
     }
 }
 
+/// `dbpylot config set-key <provider>` — store an API key from stdin.
+///
+/// Security invariants: the key is only ever read from stdin (never argv, so
+/// it can't leak via `ps` or shell history), it is never echoed or logged,
+/// and confirmation output shows at most the last 4 characters.
+fn cmd_set_key(provider: &str) -> Result<()> {
+    use std::io::{IsTerminal, Read};
+
+    match provider {
+        "openai" | "anthropic" => {}
+        "ollama" => anyhow::bail!(
+            "ollama runs locally and does not use an API key — nothing to store"
+        ),
+        other => anyhow::bail!("unknown provider '{other}' — expected openai or anthropic"),
+    }
+
+    // Piped input (the normal path) is read to EOF; an interactive terminal
+    // gets a prompt and a single line so the user isn't left hanging.
+    let mut input = String::new();
+    if std::io::stdin().is_terminal() {
+        eprintln!("Paste the {provider} API key and press Enter:");
+        std::io::stdin().read_line(&mut input)?;
+    } else {
+        std::io::stdin().read_to_string(&mut input)?;
+    }
+
+    let key = input.trim();
+    if key.is_empty() {
+        anyhow::bail!("no key provided on stdin");
+    }
+    if key.split_whitespace().count() != 1 {
+        anyhow::bail!("the key contains whitespace — pass exactly one API key");
+    }
+
+    let secrets = open_secrets()?;
+    secrets.set(provider, key)?;
+
+    // Point the provider at the stored key so the engine actually uses it.
+    let settings_path = app::home().join("settings.json");
+    let mut settings = Settings::load(&settings_path);
+    settings.provider = provider.to_string();
+    settings.save(&settings_path)?;
+
+    let masked: String = if key.len() >= 8 {
+        format!("…{}", &key[key.len() - 4..])
+    } else {
+        "…".into()
+    };
+    println!("stored {provider} API key ({masked}) in the encrypted vault");
+    Ok(())
+}
+
+/// `dbpylot config set-db <kind> [path]` — connect a database non-interactively.
+///
+/// SQLite/DuckDB take a file path (stored in settings, made absolute). Postgres
+/// and MySQL read the connection URL from stdin — never argv — so the password
+/// can't leak via `ps` or shell history; the URL is stored in the encrypted
+/// vault, never in `settings.json`. Mirrors what `dbpylot init` does.
+fn cmd_set_db(kind: &str, path: Option<&str>) -> Result<()> {
+    use std::io::{IsTerminal, Read};
+
+    let settings_path = app::home().join("settings.json");
+    let mut settings = Settings::load(&settings_path);
+
+    match kind {
+        "postgres" | "postgresql" | "mysql" | "mariadb" => {
+            // Connection URL (with password) from stdin → vault.
+            let mut url = String::new();
+            if std::io::stdin().is_terminal() {
+                eprintln!("Paste the {kind} connection URL and press Enter:");
+                std::io::stdin().read_line(&mut url)?;
+            } else {
+                std::io::stdin().read_to_string(&mut url)?;
+            }
+            let url = url.trim();
+            if url.is_empty() {
+                anyhow::bail!("no connection URL provided on stdin");
+            }
+            let secrets = open_secrets()?;
+            secrets.set("db_connection_string", url)?;
+            settings.db_kind = kind.to_string();
+            settings.db_connection_string = url.to_string();
+            settings.save(&settings_path)?;
+            // Redact credentials before echoing the target back.
+            println!("connected {kind} database ({}) — URL stored in the encrypted vault", redact_url(url));
+        }
+        "sqlite" | "duckdb" => {
+            let file = path.ok_or_else(|| {
+                anyhow::anyhow!("{kind} needs a file path, e.g. `dbpylot config set-db {kind} /data/app.db`")
+            })?;
+            let abs = absolute_db_path(file.trim());
+            settings.db_kind = kind.to_string();
+            settings.db_path = abs.clone();
+            settings.db_connection_string.clear();
+            settings.save(&settings_path)?;
+            println!("connected {kind} database at {abs}");
+        }
+        other => anyhow::bail!("unknown database kind '{other}' — expected sqlite, postgres, mysql, or duckdb"),
+    }
+    Ok(())
+}
+
+/// Hide the password in a database URL for display, e.g.
+/// `postgres://user:secret@host/db` → `postgres://user:***@host/db`.
+fn redact_url(url: &str) -> String {
+    // Match the `user:password@` credential section and mask the password.
+    if let Some(at) = url.find('@') {
+        if let Some(scheme_end) = url.find("://") {
+            let creds = &url[scheme_end + 3..at];
+            if let Some(colon) = creds.find(':') {
+                return format!(
+                    "{}{}:***{}",
+                    &url[..scheme_end + 3],
+                    &creds[..colon],
+                    &url[at..]
+                );
+            }
+        }
+    }
+    url.to_string()
+}
+
 /// Build the configured engine (LLM + database) from saved settings + the vault.
-/// `None` means the app hasn't been set up yet.
-fn build_configured() -> Result<Option<OpenDbPylot>> {
+/// `None` means the app hasn't been set up yet. Also used by the MCP server so
+/// every entry point boots from the exact same configuration.
+pub(crate) fn build_configured() -> Result<Option<OpenDbPylot>> {
     let secrets = open_secrets()?;
     let settings = load_settings(&*secrets);
     let conversations = Arc::new(MemoryConversationStore::new());
     app::build_opendbpylot(&settings, &*secrets, conversations)
+}
+
+/// Make a database file path absolute (against the current directory) before
+/// storing it. The engine may later be launched from a different working
+/// directory — e.g. `dbpylot mcp` spawned by an agent host — and a relative
+/// path would then point at (and silently create) the wrong file.
+fn absolute_db_path(path: &str) -> String {
+    if path == ":memory:" || std::path::Path::new(path).is_absolute() {
+        return path.to_string();
+    }
+    match std::env::current_dir() {
+        Ok(cwd) => cwd.join(path).to_string_lossy().into_owned(),
+        Err(_) => path.to_string(),
+    }
 }
 
 /// Shown when the user runs a command before finishing setup.
@@ -151,9 +331,9 @@ async fn cmd_doctor() -> Result<()> {
     let settings = load_settings(&*secrets);
     println!("{}", "dbpylot doctor".bold().cyan());
 
-    // LLM provider + key.
+    // LLM provider + key (vault first, env-var fallback — same as the engine).
     let key_ok = settings.provider == "ollama"
-        || secrets.get(&settings.provider).ok().flatten().is_some();
+        || app::resolve_api_key(&settings.provider, &*secrets).ok().flatten().is_some();
     println!(
         "  LLM provider : {} {}",
         settings.provider.bold(),
@@ -184,7 +364,7 @@ async fn cmd_status() -> Result<()> {
     let secrets = open_secrets()?;
     let settings = load_settings(&*secrets);
     let key_ok = settings.provider == "ollama"
-        || secrets.get(&settings.provider).ok().flatten().is_some();
+        || app::resolve_api_key(&settings.provider, &*secrets).ok().flatten().is_some();
     let model = settings.effective_model();
     let target = match settings.db_kind.as_str() {
         "postgres" | "postgresql" | "mysql" | "mariadb" => {
@@ -274,11 +454,23 @@ async fn cmd_init() -> Result<()> {
     let mut settings = Settings::load(&app::home().join("settings.json"));
     settings.provider = provider.clone();
 
-    // 2. API key (into the encrypted vault), unless Ollama.
+    // 2. API key (into the encrypted vault), unless Ollama. A key may already
+    // be present — e.g. synced by a host app via `dbpylot config set-key` —
+    // in which case leaving the prompt blank keeps it.
     if provider != "ollama" {
-        let key = prompt(&mut rl, &format!("{provider} API key: "))?;
+        let existing = secrets.get(&provider).ok().flatten().is_some();
+        let label = if existing {
+            format!("{provider} API key [a key is stored — leave blank to keep it]: ")
+        } else {
+            format!("{provider} API key: ")
+        };
+        let key = prompt(&mut rl, &label)?;
         if key.trim().is_empty() {
-            println!("  {}", "no key entered — you can add one later in the web UI".yellow());
+            if existing {
+                println!("  {}", "keeping the stored key".green());
+            } else {
+                println!("  {}", "no key entered — you can add one later in the web UI".yellow());
+            }
         } else {
             secrets.set(&provider, key.trim())?;
         }
@@ -318,7 +510,8 @@ async fn cmd_init() -> Result<()> {
         _ => {
             let default = if db_kind == "duckdb" { ":memory:" } else { "demo.db" };
             let path = prompt(&mut rl, &format!("file path [{default}]: "))?;
-            settings.db_path = if path.trim().is_empty() { default.into() } else { path.trim().into() };
+            let path = if path.trim().is_empty() { default.to_string() } else { path.trim().to_string() };
+            settings.db_path = absolute_db_path(&path);
         }
     }
 

@@ -121,6 +121,21 @@ pub fn init_tracing() {
     let _ = fmt().with_env_filter(filter).with_target(false).without_time().try_init();
 }
 
+/// Like [`init_tracing`], but logs to STDERR. Required by `dbpylot mcp`, whose
+/// stdout is reserved for the JSON-RPC protocol stream — a single stray log
+/// line on stdout would corrupt it. Idempotent, but must run before
+/// `init_tracing` on the MCP path (`try_init` is first-wins).
+pub fn init_tracing_stderr() {
+    use tracing_subscriber::{fmt, EnvFilter};
+    let filter = EnvFilter::try_from_env("OPENDBPYLOT_LOG").unwrap_or_else(|_| EnvFilter::new("warn"));
+    let _ = fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .with_target(false)
+        .without_time()
+        .try_init();
+}
+
 /// Per-user data directory (`$OPENDBPYLOT_HOME` or `~/.opendbpylot`), created if needed.
 pub fn home() -> PathBuf {
     let dir = std::env::var("OPENDBPYLOT_HOME").map(PathBuf::from).unwrap_or_else(|_| {
@@ -139,6 +154,25 @@ struct Components {
     dialect: &'static str,
 }
 
+/// Resolve the API key for a provider. The encrypted vault always wins; the
+/// standard environment variables (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY`) are
+/// a fallback so MCP hosts, containers, and CI can configure `dbpylot` without
+/// a vault. Never logged; callers must not print the returned value.
+pub fn resolve_api_key(provider: &str, secrets: &dyn SecretStore) -> Result<Option<String>> {
+    if let Some(key) = secrets.get(provider)? {
+        return Ok(Some(key));
+    }
+    let var = match provider {
+        "openai" => "OPENAI_API_KEY",
+        "anthropic" => "ANTHROPIC_API_KEY",
+        _ => return Ok(None),
+    };
+    Ok(std::env::var(var)
+        .ok()
+        .map(|k| k.trim().to_string())
+        .filter(|k| !k.is_empty()))
+}
+
 /// Build the shared LLM / vector store / SQL runner. Returns `None` when a required
 /// API key is missing (so the app can show a "not configured" state).
 fn build_components(settings: &Settings, secrets: &dyn SecretStore) -> Result<Option<Components>> {
@@ -153,7 +187,13 @@ fn build_components(settings: &Settings, secrets: &dyn SecretStore) -> Result<Op
     let settings = &settings;
 
     let model = settings.effective_model();
-    let openai_key = secrets.get("openai")?;
+    // For the LLM, an env var may stand in for the vault (so MCP hosts / CI can
+    // configure a key without the wizard). The embedding backend decision below
+    // deliberately uses the vault only, so an `OPENAI_API_KEY` in the
+    // environment can never silently switch "auto" embeddings from local to
+    // paid OpenAI (which would also orphan an existing knowledge base).
+    let openai_key = resolve_api_key("openai", secrets)?;
+    let openai_vault_key = secrets.get("openai")?;
 
     // 0 = keep the per-provider default timeout.
     let timeout = (settings.llm_timeout_secs > 0)
@@ -170,7 +210,7 @@ fn build_components(settings: &Settings, secrets: &dyn SecretStore) -> Result<Op
             }
             None => return Ok(None),
         },
-        "anthropic" => match secrets.get("anthropic")? {
+        "anthropic" => match resolve_api_key("anthropic", secrets)? {
             Some(k) => {
                 let mut p = AnthropicLlm::new(k, model);
                 if let Some(t) = timeout {
@@ -225,7 +265,7 @@ fn build_components(settings: &Settings, secrets: &dyn SecretStore) -> Result<Op
     let (embedding, embedder_tag): (Arc<dyn EmbeddingService>, &str) =
         match settings.embedding_provider.as_str() {
             "local" => (Arc::new(LocalEmbedding::new()), "local"),
-            "openai" => match openai_key.clone() {
+            "openai" => match openai_vault_key.clone() {
                 Some(k) => (openai_embedder(k), "openai"),
                 None => anyhow::bail!(
                     "embedding_provider is 'openai' but no OpenAI API key is stored"
@@ -249,8 +289,9 @@ fn build_components(settings: &Settings, secrets: &dyn SecretStore) -> Result<Op
                      reinstall with: cargo install opendbpylot --features fastembed"
                 )
             }
-            // "auto" and anything unknown: previous behavior.
-            _ => match openai_key.clone() {
+            // "auto" and anything unknown: previous behavior (vault-only, so an
+            // env var can't flip the embedder and orphan the knowledge base).
+            _ => match openai_vault_key.clone() {
                 Some(k) if settings.provider != "mock" => (openai_embedder(k), "openai"),
                 _ => (Arc::new(LocalEmbedding::new()), "local"),
             },
