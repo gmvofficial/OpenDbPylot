@@ -55,9 +55,13 @@ fn api_err<E: std::fmt::Display>(e: E) -> (StatusCode, String) {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
 }
 
-/// Boot the web app on `127.0.0.1:8080`. When `open_browser` is true, opens the
-/// user's default browser at the URL once the listener is up.
-pub async fn run(open_browser: bool) -> Result<()> {
+/// Boot the web app on `127.0.0.1:<port>`. When `open_browser` is true, opens
+/// the user's default browser at the URL once the listener is up.
+///
+/// Loopback only, always: the app has no authentication of its own, so it must
+/// never be reachable from the network. A host that wants to expose it (such as
+/// OpenPylot's companion proxy) puts its own access control in front.
+pub async fn run(open_browser: bool, port: u16) -> Result<()> {
     app::init_tracing();
     let mut settings = Settings::load(&app::home().join("settings.json"));
 
@@ -111,9 +115,9 @@ pub async fn run(open_browser: bool) -> Result<()> {
         .route("/api/opendbpylot/v2/chat_websocket", get(chat_ws))
         .with_state(state);
 
-    let addr = "127.0.0.1:8080";
+    let addr = format!("127.0.0.1:{port}");
     let url = format!("http://{addr}");
-    let listener = tokio::net::TcpListener::bind(addr)
+    let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .map_err(|e| anyhow::anyhow!("could not bind {addr} (is opendbpylot already running?): {e}"))?;
     println!("opendbpylot is running at {url}");

@@ -56,6 +56,13 @@ enum Command {
         /// Don't open a browser — for servers, containers, or remote hosts
         #[arg(long)]
         headless: bool,
+        /// Port to bind on 127.0.0.1. Defaults to 8080.
+        ///
+        /// A host that embeds opendbpylot (OpenPylot's companion registry, for
+        /// one) assigns an ephemeral port so several instances can coexist and
+        /// so a fixed port is never a source of startup collisions.
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
     },
     /// Test that the configured LLM and database are reachable
     Doctor,
@@ -143,7 +150,7 @@ pub async fn run_with(args: Vec<String>) -> Result<()> {
         None => cmd_chat().await,
         Some(Command::Init) => cmd_init().await,
         Some(Command::Ask { question }) => cmd_ask(&question.join(" ")).await,
-        Some(Command::Serve { headless }) => crate::server::run(!headless).await,
+        Some(Command::Serve { headless, port }) => crate::server::run(!headless, port).await,
         Some(Command::Doctor) => cmd_doctor().await,
         Some(Command::Status) => cmd_status().await,
         Some(Command::Demo { question }) => cmd_demo(&question.join(" ")).await,
