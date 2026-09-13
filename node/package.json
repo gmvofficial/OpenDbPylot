@@ -1,7 +1,7 @@
 {
   "name": "opendbpylot",
-  "version": "0.2.0",
-  "description": "opendbpylot — natural-language → SQL via Retrieval-Augmented Generation (Node.js / NAPI bindings)",
+  "version": "0.3.0",
+  "description": "opendbpylot \u2014 natural-language \u2192 SQL via Retrieval-Augmented Generation (Node.js / NAPI bindings)",
   "main": "index.js",
   "types": "index.d.ts",
   "license": "Apache-2.0",
@@ -61,10 +61,10 @@
     "@napi-rs/cli": "^2.18.0"
   },
   "optionalDependencies": {
-    "opendbpylot-darwin-x64": "0.2.0",
-    "opendbpylot-darwin-arm64": "0.2.0",
-    "opendbpylot-linux-x64-gnu": "0.2.0",
-    "opendbpylot-linux-arm64-gnu": "0.2.0",
-    "opendbpylot-win32-x64-msvc": "0.2.0"
+    "opendbpylot-darwin-x64": "0.3.0",
+    "opendbpylot-darwin-arm64": "0.3.0",
+    "opendbpylot-linux-x64-gnu": "0.3.0",
+    "opendbpylot-linux-arm64-gnu": "0.3.0",
+    "opendbpylot-win32-x64-msvc": "0.3.0"
   }
 }

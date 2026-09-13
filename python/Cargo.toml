@@ -1,6 +1,6 @@
 [package]
 name = "opendbpylot-python-bindings"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Python bindings for opendbpylot — natural-language → SQL via RAG"
 license = "Apache-2.0"

@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "opendbpylot"
-version = "0.2.0"
+version = "0.3.0"
 description = "opendbpylot — natural-language → SQL via Retrieval-Augmented Generation (Python bindings)"
 license = "Apache-2.0"
 requires-python = ">=3.9"

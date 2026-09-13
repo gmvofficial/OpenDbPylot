@@ -1,13 +1,26 @@
 {
   "name": "opendbpylot-darwin-arm64",
-  "version": "0.2.0",
-  "os": ["darwin"],
-  "cpu": ["arm64"],
+  "version": "0.3.0",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
   "main": "opendbpylot.darwin-arm64.node",
-  "files": ["opendbpylot.darwin-arm64.node"],
+  "files": [
+    "opendbpylot.darwin-arm64.node"
+  ],
   "description": "opendbpylot native addon (aarch64-apple-darwin)",
   "license": "Apache-2.0",
-  "engines": { "node": ">=16" },
-  "publishConfig": { "access": "public" },
-  "repository": { "type": "git", "url": "git+https://github.com/gmvofficial/OpenDbPylot.git" }
+  "engines": {
+    "node": ">=16"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gmvofficial/OpenDbPylot.git"
+  }
 }
