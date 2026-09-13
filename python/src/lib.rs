@@ -140,11 +140,16 @@ impl OpenDbPylot {
     /// Launch the embedded web UI (frontend + backend) and open a browser.
     /// Runs in-process until interrupted — no CLI binary required. Configure your
     /// LLM provider and database from the Settings panel.
+    ///
+    /// `port` binds on 127.0.0.1 and defaults to 8080, matching `dbpylot serve`.
+    /// A host embedding the app can pass an ephemeral port so several instances
+    /// coexist without colliding.
     #[staticmethod]
-    fn serve() -> PyResult<()> {
+    #[pyo3(signature = (port = 8080))]
+    fn serve(port: u16) -> PyResult<()> {
         let rt = tokio::runtime::Runtime::new()
             .map_err(|e| PyRuntimeError::new_err(format!("failed to start async runtime: {e}")))?;
-        rt.block_on(opendbpylot::server::run(true))
+        rt.block_on(opendbpylot::server::run(true, port))
             .map_err(|e| PyRuntimeError::new_err(format!("{e:#}")))
     }
 

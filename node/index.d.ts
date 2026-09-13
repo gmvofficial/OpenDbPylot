@@ -32,8 +32,11 @@ export class OpenDbPylot {
   trainQuestionSql(question: string, sql: string): void
   /** Run the interactive setup wizard (delegates to the `dbpylot` CLI). */
   static init(): void
-  /** Launch the web UI (delegates to the `dbpylot` CLI). */
-  static serve(): void
+  /**
+   * Launch the embedded web UI in-process and open a browser. `port` binds on
+   * 127.0.0.1 and defaults to 8080.
+   */
+  static serve(port?: number | undefined | null): void
   /** Test the configured LLM + database connections (delegates to `dbpylot`). */
   static doctor(): void
 }
