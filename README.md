@@ -35,11 +35,48 @@ dbpylot doctor    # check your LLM and database connections
 dbpylot status    # show the current configuration
 dbpylot demo      # try it offline on a sample database
 dbpylot mcp       # serve as an MCP server for agent hosts
+dbpylot eval      # measure NL→SQL accuracy against reference questions
+dbpylot review    # approve what the model learns from your conversations
 ```
 
 `dbpylot init` walks you through choosing a provider (OpenAI, Anthropic, or a local Ollama
 model), stores the API key in an encrypted vault, and connects a database. If you prefer a UI,
 `dbpylot serve` opens the same setup in the browser.
+
+## Measuring accuracy
+
+Accuracy claims are worth what their measurement is worth, so there is a harness:
+
+```bash
+dbpylot eval --cases benchmarks/hard.json --demo --runs 3
+```
+
+It runs each question through the full pipeline, executes both the generated and the reference
+SQL, and compares result sets — so a correct query written differently still counts. Questions
+the model was trained on are scored separately from held-out ones, because mixing them overstates
+capability.
+
+**Use `--runs 3` or more.** The model is nondeterministic: three runs of an unchanged pipeline on
+the bundled hard set scored 75%, 65% and 60%. One run cannot tell a real change from that, and the
+harness now says so — a `--baseline` comparison whose delta falls inside the baseline's own spread
+is reported as inconclusive rather than as a result.
+
+The current held-out baseline on `benchmarks/hard.json` is **58.3%, mean of three runs (55–60%)**.
+The older `benchmarks/demo.json` scores 100% and is saturated; it checks plumbing, not capability.
+
+## Reviewing what it learns
+
+A question whose SQL returned rows is not necessarily a question answered correctly, and a wrong
+example teaches its mistake to everything that later retrieves it. So captured question/SQL pairs
+wait for a human:
+
+```bash
+dbpylot review                  # what is waiting
+dbpylot review approve <id>     # add it to the training corpus
+dbpylot review reject <id>      # discard it, permanently
+```
+
+Nothing reaches retrieval until it is approved. Rejected pairs never come back.
 
 ## Features
 
