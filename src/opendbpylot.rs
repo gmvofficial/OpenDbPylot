@@ -22,8 +22,16 @@ use crate::vectorstore::VectorStore;
 pub struct OpenDbPylotConfig {
     /// SQL dialect named in the prompt (e.g. "SQLite", "PostgreSQL").
     pub dialect: String,
-    /// After a successful question, store it as a new training example.
+    /// After a successful question, capture it for review as a possible new
+    /// training example.
+    ///
+    /// Captures go to the review queue, not straight into retrieval — see
+    /// [`crate::review`]. "The query returned rows" is not "the query was
+    /// right", and an unreviewed example teaches its mistake to every later
+    /// question that retrieves it.
     pub auto_train: bool,
+    /// Where captured pairs wait for review. `None` disables capture entirely.
+    pub review_queue_path: Option<std::path::PathBuf>,
     /// Allow the LLM to run an exploratory ("intermediate") query and see its
     /// results before writing the final SQL. Off by default for privacy.
     pub allow_llm_to_see_data: bool,
@@ -51,6 +59,7 @@ impl Default for OpenDbPylotConfig {
             // pollutes the knowledge base with whatever SQL the model happened to
             // produce. Saving examples should be a deliberate action.
             auto_train: false,
+            review_queue_path: None,
             allow_llm_to_see_data: false,
             history_limit: 5,
             max_sql_repairs: 2,
@@ -277,13 +286,18 @@ impl OpenDbPylot {
     }
 
     /// Full `ask` flow: generate SQL, validate + run it (if a DB is connected and
-    /// the SQL is a safe read), self-repairing failures, and optionally self-train.
+    /// the SQL is a safe read), self-repairing failures, and — when enabled —
+    /// capture the pair for review.
+    ///
+    /// Capture is not training. The pair waits in the review queue until a human
+    /// approves it, because "the query returned rows" is not "the query was
+    /// right", and a wrong exemplar teaches its mistake to everything that
+    /// later retrieves it.
     pub async fn ask(&self, question: &str) -> Result<AskResult> {
         let mut out = self.ask_core(question, &[]).await?;
-        // Self-learning: remember successful question/SQL pairs.
         if let Some(rows) = &out.result {
             if self.config.auto_train && !rows.rows.is_empty() {
-                let _ = self.store.add_question_sql(question, &out.sql).await;
+                self.capture_for_review(question, &out.sql, rows.rows.len()).await;
             }
         }
         self.maybe_summarize(question, &mut out).await;
@@ -300,7 +314,8 @@ impl OpenDbPylot {
         let mut out = self.ask_core(question, &history).await?;
         if let Some(rows) = &out.result {
             if !rows.rows.is_empty() {
-                self.record_turn(conversation_id, question, &out.sql).await;
+                self.record_turn_with_rows(conversation_id, question, &out.sql, rows.rows.len())
+                    .await;
             }
         }
         self.maybe_summarize(question, &mut out).await;
@@ -424,14 +439,56 @@ impl OpenDbPylot {
     /// Record a successful turn: append it to the conversation (for follow-ups)
     /// and, if `auto_train` is on, store it as a new training example (self-learning).
     pub async fn record_turn(&self, conversation_id: &str, question: &str, sql: &str) {
+        self.record_turn_with_rows(conversation_id, question, sql, 0).await;
+    }
+
+    /// As [`record_turn`](Self::record_turn), with the row count carried into
+    /// the review queue — zero rows is a common sign of a subtly wrong query,
+    /// and a reviewer wants to see it.
+    pub async fn record_turn_with_rows(
+        &self,
+        conversation_id: &str,
+        question: &str,
+        sql: &str,
+        row_count: usize,
+    ) {
         if let Some(store) = &self.conversations {
             let _ = store
                 .append(conversation_id, QuestionSql { question: question.to_string(), sql: sql.to_string() })
                 .await;
         }
         if self.config.auto_train {
-            let _ = self.store.add_question_sql(question, sql).await;
+            self.capture_for_review(question, sql, row_count).await;
         }
+    }
+
+    /// Queue a question/SQL pair for human review.
+    ///
+    /// Best-effort: a queue that cannot be written must never fail the user's
+    /// query, which already succeeded.
+    pub async fn capture_for_review(&self, question: &str, sql: &str, row_count: usize) {
+        let Some(path) = &self.config.review_queue_path else {
+            return;
+        };
+        let mut queue = match crate::review::ReviewQueue::load(path) {
+            Ok(q) => q,
+            Err(e) => {
+                tracing::warn!("Could not load the review queue: {e:#}");
+                return;
+            }
+        };
+        if queue.capture(question, sql, row_count) == crate::review::Captured::Queued {
+            if let Err(e) = queue.save(path) {
+                tracing::warn!("Could not save the review queue: {e:#}");
+            }
+        }
+    }
+
+    /// Add an approved pair to the training corpus.
+    ///
+    /// The only path from the review queue into retrieval.
+    pub async fn train_approved(&self, pair: &QuestionSql) -> Result<()> {
+        self.store.add_question_sql(&pair.question, &pair.sql).await
     }
 }
 

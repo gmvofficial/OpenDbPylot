@@ -28,6 +28,7 @@ pub mod vectorstore;
 pub mod sqlrunner;
 pub mod prompt;
 pub mod retrieval;
+pub mod review;
 pub mod schema;
 pub mod sql;
 pub mod types;

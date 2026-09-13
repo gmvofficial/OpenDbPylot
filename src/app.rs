@@ -320,6 +320,10 @@ pub fn build_opendbpylot(
             .with_config(OpenDbPylotConfig {
                 dialect: c.dialect.to_string(),
                 allow_llm_to_see_data: true,
+                // Captures land here for review rather than going straight
+                // into retrieval. Shared by the CLI and the web app, so
+                // `dbpylot review` sees everything either produced.
+                review_queue_path: Some(crate::review::ReviewQueue::path_in(&home())),
                 ..Default::default()
             }),
     ))
@@ -348,6 +352,10 @@ pub fn build_core(
             .with_config(OpenDbPylotConfig {
                 dialect: c.dialect.to_string(),
                 allow_llm_to_see_data: true,
+                // Captures land here for review rather than going straight
+                // into retrieval. Shared by the CLI and the web app, so
+                // `dbpylot review` sees everything either produced.
+                review_queue_path: Some(crate::review::ReviewQueue::path_in(&home())),
                 ..Default::default()
             }),
     );

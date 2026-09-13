@@ -86,6 +86,15 @@ enum Command {
         #[arg(long, default_value_t = 0.0)]
         tolerance: f64,
     },
+    /// Review question/SQL pairs captured from use before they train the model
+    ///
+    /// Nothing captured during a conversation reaches retrieval until it is
+    /// approved here — an unreviewed example teaches its mistakes to every
+    /// later question that retrieves it.
+    Review {
+        #[command(subcommand)]
+        action: Option<ReviewAction>,
+    },
     /// Test that the configured LLM and database are reachable
     Doctor,
     /// Show the current configuration (secrets masked)
@@ -104,6 +113,26 @@ enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+}
+
+#[derive(Subcommand)]
+enum ReviewAction {
+    /// Show what is waiting (the default)
+    List,
+    /// Add a pending pair to the training corpus
+    Approve {
+        /// Its id, or a unique prefix of one
+        id: String,
+    },
+    /// Discard a pending pair so it is never offered again
+    Reject {
+        /// Its id, or a unique prefix of one
+        id: String,
+    },
+    /// Approve everything waiting
+    ApproveAll,
+    /// Discard everything waiting
+    RejectAll,
 }
 
 #[derive(Subcommand)]
@@ -176,6 +205,7 @@ pub async fn run_with(args: Vec<String>) -> Result<()> {
         Some(Command::Eval { cases, demo, out, baseline, tolerance }) => {
             cmd_eval(cases.as_deref(), demo, out.as_deref(), baseline.as_deref(), tolerance).await
         }
+        Some(Command::Review { action }) => cmd_review(action).await,
         Some(Command::Doctor) => cmd_doctor().await,
         Some(Command::Status) => cmd_status().await,
         Some(Command::Demo { question }) => cmd_demo(&question.join(" ")).await,
@@ -557,6 +587,125 @@ async fn cmd_eval(
         }
     }
 
+    Ok(())
+}
+
+/// `dbpylot review` — curate what the model learns from use.
+///
+/// The queue is the only path from a captured conversation into the training
+/// corpus, so this is where a human decides which of its own answers the model
+/// is allowed to learn from.
+async fn cmd_review(action: Option<ReviewAction>) -> Result<()> {
+    use crate::review::ReviewQueue;
+
+    let path = ReviewQueue::path_in(&app::home());
+    let mut queue = ReviewQueue::load(&path)?;
+
+    match action.unwrap_or(ReviewAction::List) {
+        ReviewAction::List => {
+            if queue.is_empty() {
+                println!("{}", "Nothing waiting for review.".dimmed());
+                if queue.approved.is_empty() && queue.rejected.is_empty() {
+                    println!(
+                        "\nPairs are captured from conversations when {} is on.",
+                        "auto_train".cyan()
+                    );
+                } else {
+                    println!(
+                        "\n{} approved, {} rejected so far.",
+                        queue.approved.len(),
+                        queue.rejected.len()
+                    );
+                }
+                return Ok(());
+            }
+
+            println!(
+                "\n{} — {} waiting\n",
+                "Training review".bold().cyan(),
+                queue.pending_count()
+            );
+            for example in &queue.pending {
+                // A short id is enough to act on and much easier to type.
+                let short = &example.id[..8];
+                let rows = if example.row_count == 0 {
+                    // Worth flagging: a query that returned nothing is a common
+                    // sign of a subtly wrong answer.
+                    "0 rows".yellow()
+                } else {
+                    format!("{} rows", example.row_count).dimmed()
+                };
+                println!("  {}  {}  {}", short.bold(), rows, example.question);
+                println!("    {}", example.sql.dimmed());
+            }
+            println!(
+                "\n  {}  {}",
+                "approve:".dimmed(),
+                "dbpylot review approve <id>".white()
+            );
+            println!("  {}  {}", "reject: ".dimmed(), "dbpylot review reject <id>".white());
+        }
+
+        ReviewAction::Approve { id } => {
+            let Some(resolved) = queue.resolve_id(&id).map(|e| e.id.clone()) else {
+                anyhow::bail!("No pending item matching '{id}' (an ambiguous prefix matches none).");
+            };
+            let Some(pair) = queue.approve(&resolved) else {
+                anyhow::bail!("No pending item with id '{resolved}'.");
+            };
+
+            // Training needs a configured engine; if there is none, the
+            // approval is not recorded, so it can be retried after setup.
+            let secrets = open_secrets()?;
+            let settings = load_settings(&*secrets);
+            let conversations = Arc::new(MemoryConversationStore::new());
+            let Some(bot) = app::build_opendbpylot(&settings, &*secrets, conversations)? else {
+                not_configured_hint();
+                std::process::exit(1);
+            };
+            bot.train_approved(&pair).await?;
+            queue.save(&path)?;
+
+            println!("{} Added to the training corpus:", "✅".green());
+            println!("  {}", pair.question);
+        }
+
+        ReviewAction::Reject { id } => {
+            let Some(resolved) = queue.resolve_id(&id).map(|e| e.id.clone()) else {
+                anyhow::bail!("No pending item matching '{id}' (an ambiguous prefix matches none).");
+            };
+            queue.reject(&resolved);
+            queue.save(&path)?;
+            println!("{} Rejected — it will not be offered again.", "✅".green());
+        }
+
+        ReviewAction::ApproveAll => {
+            if queue.is_empty() {
+                println!("{}", "Nothing waiting for review.".dimmed());
+                return Ok(());
+            }
+            let secrets = open_secrets()?;
+            let settings = load_settings(&*secrets);
+            let conversations = Arc::new(MemoryConversationStore::new());
+            let Some(bot) = app::build_opendbpylot(&settings, &*secrets, conversations)? else {
+                not_configured_hint();
+                std::process::exit(1);
+            };
+
+            let pairs = queue.approve_all();
+            for pair in &pairs {
+                bot.train_approved(pair).await?;
+            }
+            queue.save(&path)?;
+            println!("{} Added {} pair(s) to the training corpus.", "✅".green(), pairs.len());
+        }
+
+        ReviewAction::RejectAll => {
+            let count = queue.reject_all();
+            queue.save(&path)?;
+            println!("{} Rejected {count} pair(s).", "✅".green());
+        }
+    }
     Ok(())
 }
 
