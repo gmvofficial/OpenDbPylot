@@ -511,7 +511,14 @@ async fn cmd_eval(
     let cases = eval::load_cases(cases_path)?;
 
     let (bot, db, model, dialect) = if demo || cases_path == default_cases {
-        let (bot, backend, db) = crate::demo::build_demo_with_runner(false).await?;
+        // A temp database, so a benchmark run never dirties the tracked
+        // `demo.db` in a checkout.
+        let db_path = std::env::temp_dir()
+            .join(format!("dbpylot-eval-{}.db", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let _ = std::fs::remove_file(&db_path);
+        let (bot, backend, db) = crate::demo::build_demo_at(false, &db_path).await?;
         if backend == "offline mock" {
             println!(
                 "{}",

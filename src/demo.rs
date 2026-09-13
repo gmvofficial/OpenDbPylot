@@ -374,9 +374,22 @@ pub async fn build_demo_opendbpylot() -> Result<(OpenDbPylot, &'static str)> {
 pub async fn build_demo_with_runner(
     auto_train: bool,
 ) -> Result<(OpenDbPylot, &'static str, Arc<SqliteRunner>)> {
+    build_demo_at(auto_train, "demo.db").await
+}
+
+/// As [`build_demo_with_runner`], against a database file of the caller's
+/// choosing.
+///
+/// The benchmark uses a temporary path: `demo.db` is tracked in the repository,
+/// and regenerating it on every eval run leaves a dirty working tree that is
+/// easy to commit by accident.
+pub async fn build_demo_at(
+    auto_train: bool,
+    db_path: &str,
+) -> Result<(OpenDbPylot, &'static str, Arc<SqliteRunner>)> {
     let (llm, embedding, backend) = pick_providers();
 
-    let db = SqliteRunner::new("demo.db");
+    let db = SqliteRunner::new(db_path.to_string());
     setup_demo_db(&db).await?;
     let db = Arc::new(db);
 
