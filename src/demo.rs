@@ -360,20 +360,35 @@ pub async fn train_demo(opendbpylot: &OpenDbPylot) -> Result<()> {
 
 /// Build a fully trained demo `OpenDbPylot` connected to the demo database.
 pub async fn build_demo_opendbpylot() -> Result<(OpenDbPylot, &'static str)> {
+    let (opendbpylot, backend, _db) = build_demo_with_runner(true).await?;
+    Ok((opendbpylot, backend))
+}
+
+/// As [`build_demo_opendbpylot`], but also hands back the runner and lets the
+/// caller turn off self-training.
+///
+/// The benchmark needs both: the runner to execute reference SQL, and
+/// `auto_train = false` so a passing case cannot teach itself to a later one —
+/// which would make the score depend on case order and stop it being
+/// reproducible.
+pub async fn build_demo_with_runner(
+    auto_train: bool,
+) -> Result<(OpenDbPylot, &'static str, Arc<SqliteRunner>)> {
     let (llm, embedding, backend) = pick_providers();
 
     let db = SqliteRunner::new("demo.db");
     setup_demo_db(&db).await?;
+    let db = Arc::new(db);
 
     let store = build_vector_store(embedding).await?;
     // Demo data is local & non-sensitive, so we let the model peek at values
     // (enables the intermediate_sql path for value-dependent questions).
     let opendbpylot = OpenDbPylot::new(llm, store)
-        .with_runner(Arc::new(db))
+        .with_runner(db.clone())
         .with_conversations(Arc::new(MemoryConversationStore::new()))
         .with_config(OpenDbPylotConfig {
             dialect: "SQLite".into(),
-            auto_train: true,
+            auto_train,
             allow_llm_to_see_data: true,
             // Opt-in NL answer above the table. Off for the offline mock (whose
             // canned summary adds nothing); on for real providers when the user
@@ -384,5 +399,5 @@ pub async fn build_demo_opendbpylot() -> Result<(OpenDbPylot, &'static str)> {
 
     train_demo(&opendbpylot).await?;
 
-    Ok((opendbpylot, backend))
+    Ok((opendbpylot, backend, db))
 }

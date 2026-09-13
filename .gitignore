@@ -23,3 +23,7 @@ python/dist/
 
 # macOS
 .DS_Store
+
+# Benchmark scorecards are run output, not source.
+benchmarks/*-scorecard.json
+benchmarks/scorecard.json

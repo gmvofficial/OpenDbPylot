@@ -95,3 +95,6 @@ keychain  = ["dep:keyring"]
 gen-demo  = []
 fastembed = ["dep:fastembed"]
 duckdb = ["dep:duckdb"]
+
+[dev-dependencies]
+tempfile = "3.27.0"

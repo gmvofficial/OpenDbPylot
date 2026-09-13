@@ -61,6 +61,15 @@ fn mysql_cell_to_string(row: &MySqlRow, idx: usize) -> String {
 
 #[async_trait]
 impl SqlRunner for MySqlRunner {
+    /// Enumerate low-cardinality text columns so the model can filter on real
+    /// values without an `intermediate_sql` round-trip.
+    ///
+    /// Shared with every other backend — this used to be SQLite-only, so the
+    /// feature worked on the demo database and silently did nothing here.
+    async fn categorical_hints(&self) -> Result<Vec<String>> {
+        super::hints::collect(self, super::hints::Quoting::Backtick).await
+    }
+
     async fn run_sql(&self, sql: &str) -> Result<QueryResult> {
         use tokio_stream::StreamExt;
 

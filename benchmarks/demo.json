@@ -1,0 +1,122 @@
+[
+  {
+    "question": "What is the total revenue by product category? Exclude cancelled and refunded orders.",
+    "query": "SELECT p.category, SUM(oi.quantity * oi.unit_price) AS revenue FROM order_items oi JOIN products p ON p.id = oi.product_id JOIN orders o ON o.id = oi.order_id WHERE o.status NOT IN ('cancelled','refunded') GROUP BY p.category;",
+    "seen": true,
+    "difficulty": "medium"
+  },
+  {
+    "question": "How many orders are there per country?",
+    "query": "SELECT c.country, COUNT(*) AS orders FROM orders o JOIN customers c ON c.id = o.customer_id GROUP BY c.country;",
+    "seen": true,
+    "difficulty": "medium"
+  },
+  {
+    "question": "Show monthly revenue over time, excluding cancelled and refunded orders.",
+    "query": "SELECT substr(o.order_date, 1, 7) AS month, SUM(oi.quantity * oi.unit_price) AS revenue FROM orders o JOIN order_items oi ON oi.order_id = o.id WHERE o.status NOT IN ('cancelled','refunded') GROUP BY month;",
+    "seen": true,
+    "difficulty": "medium"
+  },
+  {
+    "question": "What are the top 10 products by revenue? Count every order regardless of its status.",
+    "query": "SELECT p.name, SUM(oi.quantity * oi.unit_price) AS revenue FROM order_items oi JOIN products p ON p.id = oi.product_id GROUP BY p.name ORDER BY revenue DESC LIMIT 10;",
+    "seen": true,
+    "difficulty": "medium"
+  },
+  {
+    "question": "Break down orders by status",
+    "query": "SELECT status, COUNT(*) AS orders FROM orders GROUP BY status;",
+    "seen": true,
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many customers are there in total?",
+    "query": "SELECT COUNT(*) FROM customers;",
+    "seen": false,
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many orders are there in total?",
+    "query": "SELECT COUNT(*) FROM orders;",
+    "seen": false,
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many products are in the Electronics category?",
+    "query": "SELECT COUNT(*) FROM products WHERE category = 'Electronics';",
+    "seen": false,
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many orders are currently pending?",
+    "query": "SELECT COUNT(*) FROM orders WHERE status = 'pending';",
+    "seen": false,
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many distinct product categories are there?",
+    "query": "SELECT COUNT(DISTINCT category) FROM products;",
+    "seen": false,
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the average product price per category?",
+    "query": "SELECT category, AVG(price) FROM products GROUP BY category;",
+    "seen": false,
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many customers are in each country?",
+    "query": "SELECT country, COUNT(*) FROM customers GROUP BY country;",
+    "seen": false,
+    "difficulty": "easy"
+  },
+  {
+    "question": "Which cities have customers? Show each city with its customer count.",
+    "query": "SELECT city, COUNT(*) FROM customers GROUP BY city;",
+    "seen": false,
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many orders were placed in each month of 2024?",
+    "query": "SELECT substr(order_date, 1, 7) AS month, COUNT(*) FROM orders WHERE order_date LIKE '2024-%' GROUP BY month;",
+    "seen": false,
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many customers signed up in 2023?",
+    "query": "SELECT COUNT(*) FROM customers WHERE signup_date LIKE '2023-%';",
+    "seen": false,
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the name and price of the most expensive product?",
+    "query": "SELECT name, price FROM products ORDER BY price DESC LIMIT 1;",
+    "seen": false,
+    "difficulty": "easy"
+  },
+  {
+    "question": "What is the name and price of the cheapest product in the Books category?",
+    "query": "SELECT name, price FROM products WHERE category = 'Books' ORDER BY price ASC LIMIT 1;",
+    "seen": false,
+    "difficulty": "easy"
+  },
+  {
+    "question": "How many units in total were sold per product category? Exclude cancelled and refunded orders.",
+    "query": "SELECT p.category, SUM(oi.quantity) FROM order_items oi JOIN products p ON p.id = oi.product_id JOIN orders o ON o.id = oi.order_id WHERE o.status NOT IN ('cancelled','refunded') GROUP BY p.category;",
+    "seen": false,
+    "difficulty": "medium"
+  },
+  {
+    "question": "What was the total revenue in 2024, excluding cancelled and refunded orders?",
+    "query": "SELECT SUM(oi.quantity * oi.unit_price) FROM orders o JOIN order_items oi ON oi.order_id = o.id WHERE o.status NOT IN ('cancelled','refunded') AND o.order_date LIKE '2024-%';",
+    "seen": false,
+    "difficulty": "medium"
+  },
+  {
+    "question": "What is the average order value across all orders, including cancelled and refunded ones?",
+    "query": "SELECT AVG(t.total) FROM ( SELECT SUM(oi.quantity * oi.unit_price) AS total FROM order_items oi GROUP BY oi.order_id ) t;",
+    "seen": false,
+    "difficulty": "hard"
+  }
+]

@@ -128,6 +128,15 @@ fn value_to_string(vr: ValueRef<'_>) -> String {
 
 #[async_trait]
 impl SqlRunner for DuckDbRunner {
+    /// Enumerate low-cardinality text columns so the model can filter on real
+    /// values without an `intermediate_sql` round-trip.
+    ///
+    /// Shared with every other backend — this used to be SQLite-only, so the
+    /// feature worked on the demo database and silently did nothing here.
+    async fn categorical_hints(&self) -> Result<Vec<String>> {
+        super::hints::collect(self, super::hints::Quoting::DoubleQuote).await
+    }
+
     async fn run_sql(&self, sql: &str) -> Result<QueryResult> {
         let conn = self.conn.clone();
         let sql = sql.to_string();

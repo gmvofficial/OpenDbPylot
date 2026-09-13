@@ -1,0 +1,122 @@
+[
+  {
+    "question": "Which customers have never placed an order? List their names.",
+    "query": "SELECT c.name FROM customers c LEFT JOIN orders o ON o.customer_id = c.id WHERE o.id IS NULL;",
+    "difficulty": "hard",
+    "seen": false
+  },
+  {
+    "question": "For each country, what is the single highest-spending customer by realized revenue? Exclude cancelled and refunded orders. Show country, customer name, and their revenue.",
+    "query": "WITH spend AS (SELECT c.country, c.name, SUM(oi.quantity*oi.unit_price) AS revenue FROM customers c JOIN orders o ON o.customer_id=c.id JOIN order_items oi ON oi.order_id=o.id WHERE o.status NOT IN ('cancelled','refunded') GROUP BY c.country, c.name), ranked AS (SELECT country, name, revenue, ROW_NUMBER() OVER (PARTITION BY country ORDER BY revenue DESC, name) AS rn FROM spend) SELECT country, name, revenue FROM ranked WHERE rn = 1;",
+    "difficulty": "hard",
+    "seen": false
+  },
+  {
+    "question": "Which product categories have more than 5 distinct products AND average price above 50? Show the category, product count, and average price.",
+    "query": "SELECT category, COUNT(*) AS n, AVG(price) AS avg_price FROM products GROUP BY category HAVING COUNT(*) > 5 AND AVG(price) > 50;",
+    "difficulty": "hard",
+    "seen": false
+  },
+  {
+    "question": "What share of total realized revenue does each product category represent, as a percentage? Exclude cancelled and refunded orders.",
+    "query": "WITH rev AS (SELECT p.category, SUM(oi.quantity*oi.unit_price) AS revenue FROM order_items oi JOIN products p ON p.id=oi.product_id JOIN orders o ON o.id=oi.order_id WHERE o.status NOT IN ('cancelled','refunded') GROUP BY p.category) SELECT category, 100.0*revenue/(SELECT SUM(revenue) FROM rev) AS pct FROM rev;",
+    "difficulty": "hard",
+    "seen": false
+  },
+  {
+    "question": "Show month-over-month realized revenue growth in percent for 2024. Exclude cancelled and refunded orders.",
+    "query": "WITH m AS (SELECT substr(o.order_date,1,7) AS month, SUM(oi.quantity*oi.unit_price) AS revenue FROM orders o JOIN order_items oi ON oi.order_id=o.id WHERE o.status NOT IN ('cancelled','refunded') AND o.order_date LIKE '2024-%' GROUP BY month) SELECT month, 100.0*(revenue - LAG(revenue) OVER (ORDER BY month))/LAG(revenue) OVER (ORDER BY month) AS growth_pct FROM m ORDER BY month;",
+    "difficulty": "hard",
+    "seen": false
+  },
+  {
+    "question": "Which customers placed orders in every single month of 2024? Show their names.",
+    "query": "SELECT c.name FROM customers c JOIN orders o ON o.customer_id=c.id WHERE o.order_date LIKE '2024-%' GROUP BY c.id, c.name HAVING COUNT(DISTINCT substr(o.order_date,1,7)) = ( SELECT COUNT(DISTINCT substr(order_date,1,7)) FROM orders WHERE order_date LIKE '2024-%');",
+    "difficulty": "hard",
+    "seen": false
+  },
+  {
+    "question": "Which products have never been ordered? List their names.",
+    "query": "SELECT p.name FROM products p LEFT JOIN order_items oi ON oi.product_id = p.id WHERE oi.id IS NULL;",
+    "difficulty": "medium",
+    "seen": false
+  },
+  {
+    "question": "For each customer, how many orders were cancelled versus completed? Show name, cancelled count, completed count.",
+    "query": "SELECT c.name, SUM(CASE WHEN o.status='cancelled' THEN 1 ELSE 0 END) AS cancelled, SUM(CASE WHEN o.status='completed' THEN 1 ELSE 0 END) AS completed FROM customers c LEFT JOIN orders o ON o.customer_id=c.id GROUP BY c.id, c.name;",
+    "difficulty": "medium",
+    "seen": false
+  },
+  {
+    "question": "What is the average number of distinct products per order?",
+    "query": "SELECT AVG(n) FROM (SELECT order_id, COUNT(DISTINCT product_id) AS n FROM order_items GROUP BY order_id);",
+    "difficulty": "medium",
+    "seen": false
+  },
+  {
+    "question": "Which two product categories have the highest realized revenue? Return only the category names. Exclude cancelled and refunded orders.",
+    "query": "SELECT p.category FROM order_items oi JOIN products p ON p.id=oi.product_id JOIN orders o ON o.id=oi.order_id WHERE o.status NOT IN ('cancelled','refunded') GROUP BY p.category ORDER BY SUM(oi.quantity*oi.unit_price) DESC LIMIT 2;",
+    "difficulty": "medium",
+    "seen": false
+  },
+  {
+    "question": "Find customers whose total realized spend is above the average customer's total realized spend. Show name and total. Exclude cancelled and refunded orders.",
+    "query": "WITH spend AS (SELECT c.id, c.name, SUM(oi.quantity*oi.unit_price) AS total FROM customers c JOIN orders o ON o.customer_id=c.id JOIN order_items oi ON oi.order_id=o.id WHERE o.status NOT IN ('cancelled','refunded') GROUP BY c.id, c.name) SELECT name, total FROM spend WHERE total > (SELECT AVG(total) FROM spend);",
+    "difficulty": "hard",
+    "seen": false
+  },
+  {
+    "question": "How many days elapsed between the first and the most recent order?",
+    "query": "SELECT julianday(MAX(order_date)) - julianday(MIN(order_date)) FROM orders;",
+    "difficulty": "medium",
+    "seen": false
+  },
+  {
+    "question": "List each city alongside how many customers it has and how many of those customers have placed at least one order.",
+    "query": "SELECT c.city, COUNT(DISTINCT c.id) AS customers, COUNT(DISTINCT CASE WHEN o.id IS NOT NULL THEN c.id END) AS with_orders FROM customers c LEFT JOIN orders o ON o.customer_id=c.id GROUP BY c.city;",
+    "difficulty": "hard",
+    "seen": false
+  },
+  {
+    "question": "Which product is the most expensive within each category? Show category, product name, and price.",
+    "query": "WITH r AS (SELECT category, name, price, ROW_NUMBER() OVER (PARTITION BY category ORDER BY price DESC, name) AS rn FROM products) SELECT category, name, price FROM r WHERE rn=1;",
+    "difficulty": "hard",
+    "seen": false
+  },
+  {
+    "question": "What proportion of orders end up cancelled or refunded, as a percentage?",
+    "query": "SELECT 100.0*SUM(CASE WHEN status IN ('cancelled','refunded') THEN 1 ELSE 0 END)/COUNT(*) FROM orders;",
+    "difficulty": "medium",
+    "seen": false
+  },
+  {
+    "question": "Show the top 5 customers by number of distinct product categories they have purchased from. Return exactly two columns: the customer name and the count. Exclude cancelled and refunded orders.",
+    "query": "SELECT c.name, COUNT(DISTINCT p.category) AS categories FROM customers c JOIN orders o ON o.customer_id=c.id JOIN order_items oi ON oi.order_id=o.id JOIN products p ON p.id=oi.product_id WHERE o.status NOT IN ('cancelled','refunded') GROUP BY c.id, c.name ORDER BY categories DESC, c.name LIMIT 5;",
+    "difficulty": "hard",
+    "seen": false
+  },
+  {
+    "question": "Which countries have customers but no completed orders at all?",
+    "query": "SELECT DISTINCT c.country FROM customers c WHERE c.country NOT IN ( SELECT c2.country FROM customers c2 JOIN orders o ON o.customer_id=c2.id WHERE o.status='completed');",
+    "difficulty": "hard",
+    "seen": false
+  },
+  {
+    "question": "What is the median product price?",
+    "query": "SELECT AVG(price) FROM (SELECT price FROM products ORDER BY price LIMIT 2 - (SELECT COUNT(*) FROM products) % 2 OFFSET (SELECT (COUNT(*) - 1) / 2 FROM products));",
+    "difficulty": "hard",
+    "seen": false
+  },
+  {
+    "question": "For each order status, what is the average order value?",
+    "query": "SELECT o.status, AVG(t.total) FROM orders o JOIN (SELECT order_id, SUM(quantity*unit_price) AS total FROM order_items GROUP BY order_id) t ON t.order_id=o.id GROUP BY o.status;",
+    "difficulty": "medium",
+    "seen": false
+  },
+  {
+    "question": "How many customers signed up in each year, and what is the running cumulative total?",
+    "query": "WITH y AS (SELECT substr(signup_date,1,4) AS yr, COUNT(*) AS n FROM customers GROUP BY yr) SELECT yr, n, SUM(n) OVER (ORDER BY yr) AS cumulative FROM y ORDER BY yr;",
+    "difficulty": "hard",
+    "seen": false
+  }
+]

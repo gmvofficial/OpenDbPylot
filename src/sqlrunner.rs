@@ -4,6 +4,7 @@
 //! The trait hides the specific database, so a Postgres or MySQL runner
 //! can drop in later without changing the rest of the app.
 
+pub mod hints;
 pub mod sqlite;
 #[cfg(feature = "remote-db")]
 pub mod postgres;

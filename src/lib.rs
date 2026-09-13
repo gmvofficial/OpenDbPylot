@@ -22,6 +22,7 @@ pub mod core;
 pub mod capabilities;
 pub mod tools;
 pub mod embedding;
+pub mod eval;
 pub mod conversation;
 pub mod vectorstore;
 pub mod sqlrunner;

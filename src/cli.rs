@@ -64,6 +64,28 @@ enum Command {
         #[arg(long, default_value_t = 8080)]
         port: u16,
     },
+    /// Measure NL→SQL accuracy against a set of reference questions
+    ///
+    /// Runs each question through the full pipeline, executes the generated SQL
+    /// and the reference SQL, and compares the result sets. Reports held-out
+    /// accuracy separately from accuracy on questions the model was trained on.
+    Eval {
+        /// Case file (JSON). Spider-format files load unmodified.
+        #[arg(long, value_name = "FILE")]
+        cases: Option<std::path::PathBuf>,
+        /// Run against the bundled demo database instead of your own
+        #[arg(long)]
+        demo: bool,
+        /// Write the scorecard here, for diffing one run against another
+        #[arg(long, value_name = "FILE")]
+        out: Option<std::path::PathBuf>,
+        /// Compare against an earlier scorecard and fail on a regression
+        #[arg(long, value_name = "FILE")]
+        baseline: Option<std::path::PathBuf>,
+        /// Held-out accuracy may drop by at most this many points vs the baseline
+        #[arg(long, default_value_t = 0.0)]
+        tolerance: f64,
+    },
     /// Test that the configured LLM and database are reachable
     Doctor,
     /// Show the current configuration (secrets masked)
@@ -151,6 +173,9 @@ pub async fn run_with(args: Vec<String>) -> Result<()> {
         Some(Command::Init) => cmd_init().await,
         Some(Command::Ask { question }) => cmd_ask(&question.join(" ")).await,
         Some(Command::Serve { headless, port }) => crate::server::run(!headless, port).await,
+        Some(Command::Eval { cases, demo, out, baseline, tolerance }) => {
+            cmd_eval(cases.as_deref(), demo, out.as_deref(), baseline.as_deref(), tolerance).await
+        }
         Some(Command::Doctor) => cmd_doctor().await,
         Some(Command::Status) => cmd_status().await,
         Some(Command::Demo { question }) => cmd_demo(&question.join(" ")).await,
@@ -425,6 +450,114 @@ async fn cmd_ask(question: &str) -> Result<()> {
             std::process::exit(1);
         }
     }
+}
+
+/// `dbpylot eval` — measure accuracy and write a scorecard.
+///
+/// Auto-training is forced off for the run: a passing case that trains itself
+/// would change the score of every later case, making the result depend on case
+/// order and impossible to compare between runs.
+async fn cmd_eval(
+    cases_path: Option<&std::path::Path>,
+    demo: bool,
+    out: Option<&std::path::Path>,
+    baseline: Option<&std::path::Path>,
+    tolerance: f64,
+) -> Result<()> {
+    use crate::eval;
+
+    let default_cases = std::path::Path::new("benchmarks/demo.json");
+    let cases_path = cases_path.unwrap_or(default_cases);
+    let cases = eval::load_cases(cases_path)?;
+
+    let (bot, db, model, dialect) = if demo || cases_path == default_cases {
+        let (bot, backend, db) = crate::demo::build_demo_with_runner(false).await?;
+        if backend == "offline mock" {
+            println!(
+                "{}",
+                "NOTE: no API key found, so this run uses the offline mock. It checks the \n\
+                 harness, not accuracy — the score is not meaningful."
+                    .yellow()
+            );
+        }
+        (bot, db as Arc<dyn crate::sqlrunner::SqlRunner>, backend.to_string(), "SQLite".to_string())
+    } else {
+        let secrets = open_secrets()?;
+        let settings = load_settings(&*secrets);
+        let dialect = settings.db_kind.clone();
+        let model = settings.model.clone();
+        let conversations = Arc::new(MemoryConversationStore::new());
+        let Some(bot) = app::build_opendbpylot(&settings, &*secrets, conversations)? else {
+            not_configured_hint();
+            std::process::exit(1);
+        };
+        let db = app::build_runner(&settings)?;
+        (bot, db, model, dialect)
+    };
+
+    println!(
+        "\n{} {} case(s) from {}\n",
+        "Evaluating".bold().cyan(),
+        cases.len(),
+        cases_path.display()
+    );
+
+    let mut index = 0usize;
+    let total = cases.len();
+    let card = eval::run(&bot, db, &cases, &model, &dialect, |result| {
+        index += 1;
+        let mark = match result.verdict {
+            eval::Verdict::Exact => "PASS".green(),
+            eval::Verdict::Equivalent => "pass~".green(),
+            eval::Verdict::Wrong => "WRONG".red(),
+            eval::Verdict::Failed => "FAIL".red(),
+            eval::Verdict::BadReference => "SKIP".yellow(),
+        };
+        let tag = if result.seen { " (seen)".dimmed() } else { "".normal() };
+        println!("  [{index:>3}/{total}] {mark}{tag}  {}", result.question);
+        if let Some(sql) = &result.generated_sql {
+            println!("        {}", sql.dimmed());
+        }
+        if let Some(error) = &result.error {
+            println!("        {}", error.dimmed());
+        }
+    })
+    .await?;
+
+    println!("\n{}", "─".repeat(60));
+    print!("{}", card.summary());
+
+    if let Some(path) = out {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        std::fs::write(path, serde_json::to_string_pretty(&card)?)?;
+        println!("\nScorecard written to {}", path.display());
+    }
+
+    if let Some(path) = baseline {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("could not read baseline {}: {e}", path.display()))?;
+        let previous: eval::Scorecard = serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("could not parse baseline {}: {e}", path.display()))?;
+        let delta = card.regression_against(&previous);
+
+        println!(
+            "\nvs baseline: {:+.1} points held-out ({:.1}% → {:.1}%)",
+            delta,
+            previous.held_out.accuracy() * 100.0,
+            card.held_out.accuracy() * 100.0
+        );
+        if delta < -tolerance {
+            anyhow::bail!(
+                "held-out accuracy regressed by {:.1} points (tolerance {:.1})",
+                -delta,
+                tolerance
+            );
+        }
+    }
+
+    Ok(())
 }
 
 /// `dbpylot demo [question]` — the offline showcase on a seeded sample DB.
