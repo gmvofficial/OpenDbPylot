@@ -27,6 +27,7 @@ pub mod conversation;
 pub mod vectorstore;
 pub mod sqlrunner;
 pub mod prompt;
+pub mod rerank;
 pub mod retrieval;
 pub mod review;
 pub mod schema;

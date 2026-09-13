@@ -153,6 +153,91 @@ impl Score {
     }
 }
 
+/// Accuracy across repeated runs of the same cases.
+///
+/// # Why repeats are not optional
+///
+/// The model is nondeterministic, so one run measures one sample. Three runs
+/// of this harness on an unchanged pipeline produced 75%, 65% and 60% on the
+/// same twenty cases — a spread of fifteen points, which is wider than almost
+/// any change worth making. A single number cannot tell a real regression from
+/// that noise, so a comparison that matters reports the spread alongside the
+/// mean and says whether the difference clears it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Repeated {
+    pub runs: usize,
+    /// Held-out accuracy from each run, in order.
+    pub accuracies: Vec<f64>,
+    pub mean: f64,
+    pub min: f64,
+    pub max: f64,
+    /// Population standard deviation.
+    pub std_dev: f64,
+}
+
+impl Repeated {
+    pub fn from_runs(accuracies: Vec<f64>) -> Self {
+        let runs = accuracies.len();
+        if runs == 0 {
+            return Self {
+                runs: 0,
+                accuracies,
+                mean: 0.0,
+                min: 0.0,
+                max: 0.0,
+                std_dev: 0.0,
+            };
+        }
+        let mean = accuracies.iter().sum::<f64>() / runs as f64;
+        let variance =
+            accuracies.iter().map(|a| (a - mean).powi(2)).sum::<f64>() / runs as f64;
+
+        Self {
+            runs,
+            min: accuracies.iter().cloned().fold(f64::INFINITY, f64::min),
+            max: accuracies.iter().cloned().fold(f64::NEG_INFINITY, f64::max),
+            mean,
+            std_dev: variance.sqrt(),
+            accuracies,
+        }
+    }
+
+    /// The spread, in percentage points. A change smaller than this is not
+    /// distinguishable from noise at this sample size.
+    pub fn spread_points(&self) -> f64 {
+        (self.max - self.min) * 100.0
+    }
+
+    /// Whether a difference of `points` against this baseline is larger than
+    /// the observed noise.
+    ///
+    /// Deliberately strict: with a handful of runs the spread is itself a rough
+    /// estimate, so anything inside it is reported as inconclusive rather than
+    /// as an improvement.
+    pub fn is_significant(&self, points: f64) -> bool {
+        points.abs() > self.spread_points()
+    }
+
+    pub fn summary(&self) -> String {
+        if self.runs <= 1 {
+            return format!(
+                "held-out {:.1}% (1 run — too few to separate a change from noise)\n",
+                self.mean * 100.0
+            );
+        }
+        format!(
+            "held-out {:.1}% mean over {} runs (min {:.1}%, max {:.1}%, spread {:.1} points)\n\
+             A change smaller than {:.1} points is not distinguishable from noise here.\n",
+            self.mean * 100.0,
+            self.runs,
+            self.min * 100.0,
+            self.max * 100.0,
+            self.spread_points(),
+            self.spread_points(),
+        )
+    }
+}
+
 /// The whole run, as written to disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scorecard {
@@ -173,6 +258,9 @@ pub struct Scorecard {
     pub bad_references: usize,
     pub total_elapsed_ms: u128,
     pub cases: Vec<CaseResult>,
+    /// Set when the cases were run more than once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repeated: Option<Repeated>,
 }
 
 impl Scorecard {
@@ -352,6 +440,7 @@ pub fn build_scorecard(
         bad_references,
         total_elapsed_ms,
         cases: results,
+        repeated: None,
     }
 }
 
@@ -666,6 +755,71 @@ mod tests {
 
         assert!((better.regression_against(&worse) - 50.0).abs() < 1e-9);
         assert!((worse.regression_against(&better) + 50.0).abs() < 1e-9);
+    }
+
+    // ── Repeat statistics ────────────────────────────────────────────
+
+    #[test]
+    fn a_single_run_reports_itself_with_no_spread() {
+        let r = Repeated::from_runs(vec![0.75]);
+        assert_eq!(r.runs, 1);
+        assert_eq!(r.mean, 0.75);
+        assert_eq!(r.spread_points(), 0.0);
+        assert!(
+            r.summary().contains("too few"),
+            "one run must not look authoritative: {}",
+            r.summary()
+        );
+    }
+
+    #[test]
+    fn the_spread_is_reported_in_percentage_points() {
+        // The real numbers this harness produced on an unchanged pipeline.
+        let r = Repeated::from_runs(vec![0.75, 0.65, 0.60]);
+        assert_eq!(r.runs, 3);
+        assert!((r.mean - 0.6667).abs() < 0.001);
+        assert!((r.spread_points() - 15.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_change_inside_the_spread_is_not_significant() {
+        // This is the finding that motivated the whole thing: a 10-point
+        // "improvement" measured against ±15-point noise means nothing.
+        let baseline = Repeated::from_runs(vec![0.75, 0.65, 0.60]);
+        assert!(!baseline.is_significant(10.0));
+        assert!(!baseline.is_significant(-10.0));
+        assert!(baseline.is_significant(20.0));
+    }
+
+    #[test]
+    fn a_stable_pipeline_makes_small_changes_detectable() {
+        let baseline = Repeated::from_runs(vec![0.80, 0.80, 0.81]);
+        assert!(baseline.is_significant(5.0));
+    }
+
+    #[test]
+    fn no_runs_is_zero_rather_than_a_division_by_zero() {
+        let r = Repeated::from_runs(vec![]);
+        assert_eq!(r.runs, 0);
+        assert_eq!(r.mean, 0.0);
+        assert_eq!(r.spread_points(), 0.0);
+    }
+
+    #[test]
+    fn identical_runs_have_no_deviation() {
+        // Floating point: the mean of three 0.7s is not bit-identical to 0.7,
+        // so the deviation is ~1e-16 rather than exactly zero.
+        let r = Repeated::from_runs(vec![0.7, 0.7, 0.7]);
+        assert!(r.std_dev < 1e-9, "{}", r.std_dev);
+        assert!(r.spread_points() < 1e-9);
+    }
+
+    #[test]
+    fn the_summary_names_the_threshold_a_change_must_clear() {
+        let r = Repeated::from_runs(vec![0.75, 0.60]);
+        let summary = r.summary();
+        assert!(summary.contains("15.0 points"), "{summary}");
+        assert!(summary.contains("noise"), "{summary}");
     }
 
     // ── Case loading ─────────────────────────────────────────────────

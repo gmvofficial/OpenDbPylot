@@ -50,7 +50,9 @@ impl FileVectorStore {
         Ok(Self {
             path,
             embedding,
-            n_results: 10,
+            // Wider than the prompt needs, because reranking cuts it back —
+            // a reranker can only reorder what retrieval handed it.
+            n_results: 24,
             data: Mutex::new(data),
         })
     }

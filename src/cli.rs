@@ -85,6 +85,14 @@ enum Command {
         /// Held-out accuracy may drop by at most this many points vs the baseline
         #[arg(long, default_value_t = 0.0)]
         tolerance: f64,
+        /// Run the cases this many times and report the spread
+        ///
+        /// The model is nondeterministic: three runs of an unchanged pipeline
+        /// on the bundled hard set produced 75%, 65% and 60%. One run cannot
+        /// separate a real change from that, so any comparison you intend to
+        /// act on wants several.
+        #[arg(long, default_value_t = 1)]
+        runs: usize,
     },
     /// Review question/SQL pairs captured from use before they train the model
     ///
@@ -202,8 +210,9 @@ pub async fn run_with(args: Vec<String>) -> Result<()> {
         Some(Command::Init) => cmd_init().await,
         Some(Command::Ask { question }) => cmd_ask(&question.join(" ")).await,
         Some(Command::Serve { headless, port }) => crate::server::run(!headless, port).await,
-        Some(Command::Eval { cases, demo, out, baseline, tolerance }) => {
-            cmd_eval(cases.as_deref(), demo, out.as_deref(), baseline.as_deref(), tolerance).await
+        Some(Command::Eval { cases, demo, out, baseline, tolerance, runs }) => {
+            cmd_eval(cases.as_deref(), demo, out.as_deref(), baseline.as_deref(), tolerance, runs)
+                .await
         }
         Some(Command::Review { action }) => cmd_review(action).await,
         Some(Command::Doctor) => cmd_doctor().await,
@@ -493,6 +502,7 @@ async fn cmd_eval(
     out: Option<&std::path::Path>,
     baseline: Option<&std::path::Path>,
     tolerance: f64,
+    runs: usize,
 ) -> Result<()> {
     use crate::eval;
 
@@ -532,9 +542,18 @@ async fn cmd_eval(
         cases_path.display()
     );
 
+    let runs = runs.max(1);
+    let mut accuracies: Vec<f64> = Vec::with_capacity(runs);
+    let mut card: Option<eval::Scorecard> = None;
+
+    for run in 1..=runs {
+        if runs > 1 {
+            println!("{}", format!("── run {run} of {runs} ──").dimmed());
+        }
+
     let mut index = 0usize;
     let total = cases.len();
-    let card = eval::run(&bot, db, &cases, &model, &dialect, |result| {
+    let this_card = eval::run(&bot, db.clone(), &cases, &model, &dialect, |result| {
         index += 1;
         let mark = match result.verdict {
             eval::Verdict::Exact => "PASS".green(),
@@ -554,8 +573,22 @@ async fn cmd_eval(
     })
     .await?;
 
+        accuracies.push(this_card.held_out.accuracy());
+        card = Some(this_card);
+    }
+
+    // The last run's case detail is kept; the headline number is the mean, so a
+    // single lucky or unlucky run cannot stand in for the pipeline's accuracy.
+    let mut card = card.expect("at least one run");
+    let repeated = eval::Repeated::from_runs(accuracies);
+
     println!("\n{}", "─".repeat(60));
+    if repeated.runs > 1 {
+        print!("{}", repeated.summary());
+        println!();
+    }
     print!("{}", card.summary());
+    card.repeated = Some(repeated.clone());
 
     if let Some(path) = out {
         if let Some(parent) = path.parent() {
@@ -578,6 +611,24 @@ async fn cmd_eval(
             previous.held_out.accuracy() * 100.0,
             card.held_out.accuracy() * 100.0
         );
+
+        // A delta inside the measured noise says nothing, and treating it as a
+        // result is how a pipeline gets "tuned" by coin flips.
+        if let Some(baseline_spread) = &previous.repeated {
+            if !baseline_spread.is_significant(delta) {
+                println!(
+                    "{}",
+                    format!(
+                        "  Inconclusive: the baseline's own spread is {:.1} points. \
+                         Re-run with --runs to tell this apart from noise.",
+                        baseline_spread.spread_points()
+                    )
+                    .yellow()
+                );
+                return Ok(());
+            }
+        }
+
         if delta < -tolerance {
             anyhow::bail!(
                 "held-out accuracy regressed by {:.1} points (tolerance {:.1})",

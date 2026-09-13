@@ -45,6 +45,15 @@ pub struct OpenDbPylotConfig {
     /// added highest-priority-first (DDL → docs → examples → history) and the
     /// rest is dropped, so a large schema can't overflow the model's context.
     pub max_prompt_tokens: usize,
+    /// Rerank retrieved DDL with schema structure before it reaches the
+    /// prompt. Retrieval fetches `rerank_pool` candidates and this cuts them
+    /// back to what the prompt budget expects.
+    ///
+    /// Off means the fused order is used as-is.
+    pub rerank_ddl: bool,
+    /// How many DDL candidates to retrieve before reranking. Ignored when
+    /// `rerank_ddl` is off.
+    pub rerank_pool: usize,
     /// When true, `ask` makes one extra bounded LLM call to produce a short
     /// natural-language answer alongside the rows (`AskResult::answer`).
     /// Off by default — it doubles LLM calls, so callers opt in.
@@ -64,6 +73,15 @@ impl Default for OpenDbPylotConfig {
             history_limit: 5,
             max_sql_repairs: 2,
             max_prompt_tokens: crate::prompt::DEFAULT_MAX_PROMPT_TOKENS,
+            // Measured off. On the demo schema (four tables, all of which fit
+            // the prompt budget) reranking can only reorder, and a single
+            // benchmark run came out 10 points *worse* than the fused order.
+            // It stays available because table selection is the dominant
+            // failure mode on a large schema, where retrieval must actually
+            // choose — but it is not turned on by a claim, only by a
+            // measurement on the schema in question.
+            rerank_ddl: false,
+            rerank_pool: 24,
             summarize_results: false,
         }
     }
@@ -185,7 +203,7 @@ impl OpenDbPylot {
     /// and extract the final SQL.
     async fn generate_sql_inner(&self, question: &str, history: &[QuestionSql]) -> Result<String> {
         let question_sql_list = self.store.get_similar_question_sql(question).await?;
-        let ddl_list = self.store.get_related_ddl(question).await?;
+        let ddl_list = self.related_ddl_reranked(question).await?;
         let mut doc_list = self.store.get_related_documentation(question).await?;
         tracing::debug!(
             ddl = ddl_list.len(),
@@ -405,7 +423,7 @@ impl OpenDbPylot {
             }
             repairs_used += 1;
 
-            let ddl_list = self.store.get_related_ddl(question).await.unwrap_or_default();
+            let ddl_list = self.related_ddl_reranked(question).await.unwrap_or_default();
             let prompt = build_repair_prompt(
                 &self.config.dialect,
                 question,
@@ -417,6 +435,22 @@ impl OpenDbPylot {
             let response = self.llm.submit_prompt(prompt).await?;
             sql = extract_sql(&response);
         }
+    }
+
+    /// Retrieve DDL and, when enabled, rerank it with schema structure.
+    ///
+    /// Picking the wrong table is the dominant failure mode in text-to-SQL, and
+    /// flat-text fusion scores a table name and its fortieth column the same.
+    /// See [`crate::rerank`].
+    async fn related_ddl_reranked(&self, question: &str) -> Result<Vec<String>> {
+        let candidates = self.store.get_related_ddl(question).await?;
+        if !self.config.rerank_ddl {
+            return Ok(candidates);
+        }
+        // The store's own limit caps what comes back, so the pool is an upper
+        // bound rather than a guarantee — reranking a short list is harmless.
+        let keep = candidates.len().min(self.config.rerank_pool / 2).max(1);
+        Ok(crate::rerank::rerank(question, candidates, keep.max(8)))
     }
 
     /// Lazily introspect the connected database into a [`SchemaIndex`], cached
